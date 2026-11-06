@@ -168,4 +168,4 @@ jobs:
           git config user.name "void-scanner-bot"
           git config user.email "void-scanner-bot@users.noreply.github.com"
           find . -name "void_data.sqlite3" -exec git add -f {} +
-          git diff --staged --quiet || (git pull --rebase && git commit -m "Update proofs & UAID database [skip ci]" && git push)
+          git diff --staged --quiet || (git commit -m "Update proofs & UAID database [skip ci]" && git pull --rebase && git push)
