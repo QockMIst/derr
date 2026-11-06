@@ -15,25 +15,157 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Run Void Scanner Batch
+      - name: Run Self-Contained Void Scanner Batch
         env:
           SCAN_BATCH_SIZE: "120"
         run: |
-          if [ -f "cloud_scan_batch.py" ]; then
-            python cloud_scan_batch.py
-          elif [ -f "void_tool/cloud_scan_batch.py" ]; then
-            cd void_tool && python cloud_scan_batch.py
-          fi
+          python3 - << 'EOF'
+          import json, os, sqlite3, time, urllib.request
+          from collections import defaultdict
+          from pathlib import Path
+
+          # Use existing cloud_scan_batch.py if all folders exist, otherwise run built-in scanner
+          if Path("cloud_scan_batch.py").exists() and Path("data/rolimons.py").exists() and Path("tracker/scanner.py").exists():
+              import cloud_scan_batch
+              cloud_scan_batch.run_batch(int(os.environ.get("SCAN_BATCH_SIZE", "120")))
+              raise SystemExit(0)
+
+          DB_PATH = Path("void_data.sqlite3")
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+              "Accept": "application/json",
+          }
+
+          def get_json(url, timeout=12):
+              try:
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      return json.loads(r.read().decode("utf-8", errors="replace"))
+              except Exception:
+                  return None
+
+          conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+          conn.row_factory = sqlite3.Row
+          conn.executescript("""
+              CREATE TABLE IF NOT EXISTS items (
+                  item_id INTEGER PRIMARY KEY, name TEXT NOT NULL, acronym TEXT NOT NULL DEFAULT '',
+                  rap INTEGER NOT NULL DEFAULT 0, value INTEGER NOT NULL DEFAULT 0, default_value INTEGER NOT NULL DEFAULT 0,
+                  demand INTEGER NOT NULL DEFAULT -1, trend INTEGER NOT NULL DEFAULT -1, projected INTEGER NOT NULL DEFAULT 0,
+                  hyped INTEGER NOT NULL DEFAULT 0, rare INTEGER NOT NULL DEFAULT 0, thumbnail_url TEXT DEFAULT '',
+                  source TEXT NOT NULL DEFAULT 'rolimons', manual_value INTEGER DEFAULT NULL,
+                  collectible_item_id TEXT DEFAULT '', updated_at INTEGER NOT NULL DEFAULT 0
+              );
+              CREATE TABLE IF NOT EXISTS traders (
+                  user_id INTEGER PRIMARY KEY, username TEXT NOT NULL DEFAULT '',
+                  last_ad_at INTEGER NOT NULL DEFAULT 0, last_scanned_at INTEGER NOT NULL DEFAULT 0, scan_count INTEGER NOT NULL DEFAULT 0
+              );
+              CREATE TABLE IF NOT EXISTS owners (
+                  uaid INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, user_id INTEGER NOT NULL, seen_at INTEGER NOT NULL
+              );
+              CREATE TABLE IF NOT EXISTS uaid_moves (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT, uaid INTEGER NOT NULL, item_id INTEGER NOT NULL,
+                  from_user_id INTEGER NOT NULL, to_user_id INTEGER NOT NULL, detected_at INTEGER NOT NULL,
+                  matched_trade_id INTEGER DEFAULT NULL
+              );
+              CREATE TABLE IF NOT EXISTS trades (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT, user_a_id INTEGER NOT NULL, user_a_name TEXT NOT NULL DEFAULT '',
+                  user_b_id INTEGER NOT NULL, user_b_name TEXT NOT NULL DEFAULT '', items_a_json TEXT NOT NULL,
+                  items_b_json TEXT NOT NULL, value_a INTEGER NOT NULL, rap_a INTEGER NOT NULL,
+                  value_b INTEGER NOT NULL, rap_b INTEGER NOT NULL, op_value INTEGER NOT NULL, op_rap INTEGER NOT NULL,
+                  trade_type TEXT NOT NULL DEFAULT 'SWAP', detected_at INTEGER NOT NULL, predicted_op INTEGER DEFAULT NULL
+              );
+              CREATE TABLE IF NOT EXISTS trade_items (
+                  trade_id INTEGER NOT NULL, item_id INTEGER NOT NULL, side TEXT NOT NULL, uaid INTEGER NOT NULL DEFAULT 0,
+                  item_value INTEGER NOT NULL, item_rap INTEGER NOT NULL, other_side_value INTEGER NOT NULL,
+                  side_total_value INTEGER NOT NULL, realized_op INTEGER NOT NULL, detected_at INTEGER NOT NULL,
+                  PRIMARY KEY (trade_id, item_id, uaid)
+              );
+          """)
+
+          now = int(time.time())
+          d_items = get_json("https://api.rolimons.com/items/v2/itemdetails")
+          items_map = {}
+          if d_items and d_items.get("success"):
+              rows = []
+              for k, v in d_items.get("items", {}).items():
+                  iid = int(k)
+                  rap = max(0, int(v[2] or 0))
+                  val = int(v[3]) if v[3] is not None and v[3] >= 0 else int(v[4] or rap)
+                  items_map[iid] = {"item_id": iid, "name": str(v[0]), "acronym": str(v[1] or ""), "rap": rap, "value": val}
+                  rows.append((iid, str(v[0]), str(v[1] or ""), rap, val, int(v[4] or rap), int(v[5] or -1), int(v[6] or -1), 1 if v[7]==1 else 0, 1 if v[8]==1 else 0, 1 if v[9]==1 else 0, now))
+              conn.executemany("""
+                  INSERT INTO items (item_id,name,acronym,rap,value,default_value,demand,trend,projected,hyped,rare,updated_at)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                  ON CONFLICT(item_id) DO UPDATE SET rap=excluded.rap, value=excluded.value, demand=excluded.demand, updated_at=excluded.updated_at
+              """, rows)
+              conn.commit()
+
+          d_ads = get_json("https://api.rolimons.com/tradeads/v1/getrecentads")
+          if d_ads and d_ads.get("success"):
+              for ad in d_ads.get("trade_ads", []):
+                  conn.execute("""
+                      INSERT INTO traders (user_id, username, last_ad_at, last_scanned_at, scan_count)
+                      VALUES (?, ?, ?, 0, 0)
+                      ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, last_ad_at=MAX(traders.last_ad_at, excluded.last_ad_at)
+                  """, (int(ad[2]), str(ad[3]), int(ad[1])))
+              conn.commit()
+
+          batch_size = int(os.environ.get("SCAN_BATCH_SIZE", "120"))
+          traders = conn.execute("SELECT user_id, username FROM traders ORDER BY last_scanned_at ASC, last_ad_at DESC LIMIT ?", (batch_size,)).fetchall()
+          moves_count = 0
+          for idx, tr in enumerate(traders):
+              uid = int(tr["user_id"])
+              ts = int(time.time())
+              pa = get_json(f"https://api.rolimons.com/players/v1/playerassets/{uid}")
+              inv = {}
+              if pa and pa.get("success") and pa.get("playerAssets"):
+                  for iid_s, uaids in pa["playerAssets"].items():
+                      for u in uaids:
+                          inv[int(u)] = int(iid_s)
+              if inv:
+                  ph = ",".join("?" for _ in inv)
+                  prevs = {r["uaid"]: r for r in conn.execute(f"SELECT uaid, user_id FROM owners WHERE uaid IN ({ph})", list(inv.keys())).fetchall()}
+                  for uaid, iid in inv.items():
+                      if uaid in prevs and prevs[uaid]["user_id"] != uid:
+                          conn.execute("INSERT INTO uaid_moves (uaid,item_id,from_user_id,to_user_id,detected_at) VALUES (?,?,?,?,?)", (uaid, iid, prevs[uaid]["user_id"], uid, ts))
+                          moves_count += 1
+                  conn.executemany("INSERT OR REPLACE INTO owners (uaid,item_id,user_id,seen_at) VALUES (?,?,?,?)", [(u, i, uid, ts) for u, i in inv.items()])
+              conn.execute("UPDATE traders SET last_scanned_at=?, scan_count=scan_count+1 WHERE user_id=?", (ts, uid))
+              conn.commit()
+              time.sleep(0.6)
+
+          # Match counter-moves into trades
+          unmatched = conn.execute("SELECT * FROM uaid_moves WHERE matched_trade_id IS NULL").fetchall()
+          by_pair = defaultdict(list)
+          for m in unmatched:
+              by_pair[(m["from_user_id"], m["to_user_id"])].append(dict(m))
+          visited = set()
+          for (ua, ub), m_ab in list(by_pair.items()):
+              pk = (min(ua, ub), max(ua, ub))
+              if pk in visited or not by_pair.get((ub, ua)):
+                  continue
+              visited.add(pk)
+              m_ba = by_pair[(ub, ua)][:4]
+              m_ab = m_ab[:4]
+              ia = [{"item_id": x["item_id"], "uaid": x["uaid"], "name": items_map.get(x["item_id"], {}).get("name", f"Item #{x['item_id']}"), "value": items_map.get(x["item_id"], {}).get("value", 0), "rap": items_map.get(x["item_id"], {}).get("rap", 0)} for x in m_ab]
+              ib = [{"item_id": x["item_id"], "uaid": x["uaid"], "name": items_map.get(x["item_id"], {}).get("name", f"Item #{x['item_id']}"), "value": items_map.get(x["item_id"], {}).get("value", 0), "rap": items_map.get(x["item_id"], {}).get("rap", 0)} for x in m_ba]
+              va, ra = sum(x["value"] for x in ia), sum(x["rap"] for x in ia)
+              vb, rb = sum(x["value"] for x in ib), sum(x["rap"] for x in ib)
+              cur = conn.execute("INSERT INTO trades (user_a_id,user_a_name,user_b_id,user_b_name,items_a_json,items_b_json,value_a,rap_a,value_b,rap_b,op_value,op_rap,trade_type,detected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (ua, f"User_{ua}", ub, f"User_{ub}", json.dumps(ia), json.dumps(ib), va, ra, vb, rb, abs(va-vb), abs(ra-rb), "SWAP", now))
+              tid = cur.lastrowid
+              mids = [x["id"] for x in m_ab + m_ba]
+              conn.execute(f"UPDATE uaid_moves SET matched_trade_id=? WHERE id IN ({','.join('?' for _ in mids)})", [tid, *mids])
+              conn.commit()
+
+          print("Items:", conn.execute("SELECT COUNT(*) FROM items").fetchone()[0])
+          print("Traders:", conn.execute("SELECT COUNT(*) FROM traders").fetchone()[0], "Scanned:", conn.execute("SELECT COUNT(*) FROM traders WHERE scan_count>0").fetchone()[0])
+          print("UAIDs:", conn.execute("SELECT COUNT(*) FROM owners").fetchone()[0], "Moves:", moves_count, "Proofs:", conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0])
+          EOF
 
       - name: Save Updated Database Back to Repo
         run: |
           git config user.name "void-scanner-bot"
           git config user.email "void-scanner-bot@users.noreply.github.com"
-          git add -f *void_data.sqlite3 || true
-          git diff --staged --quiet || git commit -m "Update proofs & UAID database [skip ci]"
-          git push
+          find . -name "void_data.sqlite3" -exec git add -f {} +
+          git diff --staged --quiet || (git pull --rebase && git commit -m "Update proofs & UAID database [skip ci]" && git push)
