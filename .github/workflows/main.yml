@@ -1,0 +1,39 @@
+name: Void 24/7 Cloud Scanner
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Void Scanner Batch
+        env:
+          SCAN_BATCH_SIZE: "120"
+        run: |
+          if [ -f "cloud_scan_batch.py" ]; then
+            python cloud_scan_batch.py
+          elif [ -f "void_tool/cloud_scan_batch.py" ]; then
+            cd void_tool && python cloud_scan_batch.py
+          fi
+
+      - name: Save Updated Database Back to Repo
+        run: |
+          git config user.name "void-scanner-bot"
+          git config user.email "void-scanner-bot@users.noreply.github.com"
+          git add -f *void_data.sqlite3 || true
+          git diff --staged --quiet || git commit -m "Update proofs & UAID database [skip ci]"
+          git push
