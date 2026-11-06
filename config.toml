@@ -1,0 +1,24 @@
+[sniper]
+poll_interval_seconds = 20
+min_deal_percent = 5.0
+cooldown_seconds = 1800
+filter_projecteds = true
+filter_tag_only_requests = true
+
+[tracker]
+scan_interval_seconds = 2.0
+match_window_seconds = 7200
+max_tracked_traders = 3000
+# Optional: paste your GitHub raw SQLite URL here so local app auto-pulls 24/7 cloud proofs:
+# e.g. "https://raw.githubusercontent.com/YOUR_USERNAME/void-scanner/main/void_data.sqlite3"
+github_db_raw_url = ""
+
+[engine]
+default_mode = "v3.1"
+risk_edge_1v1_rate = 0.05
+min_proofs_for_full_weight = 3
+proof_max_age_days = 30
+
+[server]
+host = "127.0.0.1"
+port = 8765
