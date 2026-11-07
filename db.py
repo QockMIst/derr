@@ -571,6 +571,7 @@ class Database:
         detected_at: Optional[int] = None,
         move_ids: Optional[List[int]] = None,
         predicted_op: Optional[int] = None,
+        source: str = "scanner",
     ) -> int:
         now = detected_at if detected_at is not None else int(time.time())
         with self._connect() as conn:
@@ -591,8 +592,8 @@ class Database:
                 INSERT INTO trades (
                     user_a_id, user_a_name, user_b_id, user_b_name,
                     items_a_json, items_b_json, value_a, rap_a, value_b, rap_b,
-                    op_value, op_rap, trade_type, detected_at, predicted_op
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    op_value, op_rap, trade_type, detected_at, predicted_op, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_a_id,
@@ -610,6 +611,7 @@ class Database:
                     trade_type,
                     now,
                     predicted_op,
+                    source,
                 ),
             )
             trade_id = cur.lastrowid
