@@ -239,9 +239,20 @@ def match_pending(conn: sqlite3.Connection, items_catalog: Dict[int, Dict[str, A
         if {x["item_id"] for x in items_a} == {x["item_id"] for x in items_b} and len(items_a) == len(items_b):
             continue
 
+        uaids_in_a = {x.get("uaid") for x in items_a if x.get("uaid")}
+        uaids_in_b = {x.get("uaid") for x in items_b if x.get("uaid")}
+        if uaids_in_a & uaids_in_b:
+            continue
+
         val_a = sum(x["value"] for x in items_a)
-        rap_a = sum(x["rap"] for x in items_a)
         val_b = sum(x["value"] for x in items_b)
+        if val_a <= 0 or val_b <= 0:
+            continue
+        ratio = max(val_a / val_b, val_b / val_a)
+        if ratio > 2.0:
+            continue
+
+        rap_a = sum(x["rap"] for x in items_a)
         rap_b = sum(x["rap"] for x in items_b)
         op_val = abs(val_a - val_b)
         op_rap = abs(rap_a - rap_b)
