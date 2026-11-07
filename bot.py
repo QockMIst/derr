@@ -219,8 +219,13 @@ class PaginatedProofsView(discord.ui.View):
         link_a = f"[{uname_a}](https://www.rolimons.com/player/{uid_a})" if uid_a > 1000 and uid_a not in (888002, 888003, 999001, 999002) else f"**{uname_a}**"
         link_b = f"[{uname_b}](https://www.rolimons.com/player/{uid_b})" if uid_b > 1000 and uid_b not in (888002, 888003, 999001, 999002) else f"**{uname_b}**"
 
+        src_raw = str(p.get("source") or "scanner").lower()
+        src_label = "Discord #value-requests" if "value_request" in src_raw else "Live Inventory Scanner"
+        src_emoji = "📸" if "value_request" in src_raw else "📡"
+
         desc_lines = [
             f"🕒 **Recorded**: `{age_str}`  •  **Type**: `{t_type}`  •  **Overpay**: `{op_abs:,}` (`{format_k(op_abs)} OP`)",
+            f"{src_emoji} **Source**: `{src_label}`",
             f"👤 **Traders**: {link_a} ⇄ {link_b}",
             "",
             f"📤 **Side A (`{p.get('value_a', 0):,}` Val / `{p.get('rap_a', 0):,}` RAP)**\n{sa}",
