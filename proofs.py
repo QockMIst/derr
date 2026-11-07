@@ -69,7 +69,23 @@ def get_item_proofs_formatted(
     raw_proofs = db.get_proofs_for_item(item_id, limit=limit * 3)
 
     if mode != "any":
-        raw_proofs = [p for p in raw_proofs if p.get("trade_type", "SWAP").lower() == mode.lower()]
+        filtered_by_mode = []
+        target_m = mode.lower()
+        for p in raw_proofs:
+            side = p.get("side", "A")
+            cnt_a = len(p.get("items_a") or [])
+            cnt_b = len(p.get("items_b") or [])
+            item_side_cnt = cnt_a if side == "A" else cnt_b
+            other_side_cnt = cnt_b if side == "A" else cnt_a
+            if target_m == "downgrade":
+                if other_side_cnt > item_side_cnt or p.get("trade_type", "").upper() == "DOWNGRADE":
+                    filtered_by_mode.append(p)
+            elif target_m == "upgrade":
+                if item_side_cnt > other_side_cnt or p.get("trade_type", "").upper() == "UPGRADE":
+                    filtered_by_mode.append(p)
+            else:
+                filtered_by_mode.append(p)
+        raw_proofs = filtered_by_mode
 
     selected = raw_proofs[:limit]
     total = len(selected)
@@ -105,10 +121,9 @@ def get_item_proofs_formatted(
             }
         )
 
-    # Always attach recent Roblox & Rolimons sales proofs so the user sees real market sales even when trade proofs < 3
     sc = sales_client or SalesClient()
     sales_summary = {"avg_price_7d": 0, "avg_price_30d": 0, "daily_volume": 0.0, "lowest_resale": 0, "recent_points": [], "live_sales": []}
-    if item_id > 100000:
+    if item_id > 0:
         try:
             sales_summary = sc.fetch_item_sales_summary(db, item_id, item_meta)
         except Exception:

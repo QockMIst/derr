@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 DEFAULT_DB_PATH = Path(__file__).parent / "void_data.sqlite3"
+OWNER_DISCORD_ID = 1388335689229275220
 
 DEMAND_LABELS = {
     -1: "Unassigned",
@@ -38,6 +39,7 @@ class Database:
         return conn
 
     def _init_schema(self) -> None:
+        now = int(time.time())
         with self._connect() as conn:
             conn.executescript(
                 """
@@ -154,9 +156,24 @@ class Database:
                     timestamp INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_live_sales_item ON live_sales(item_id, timestamp DESC);
+
+                CREATE TABLE IF NOT EXISTS whitelist (
+                    discord_user_id INTEGER PRIMARY KEY,
+                    username TEXT NOT NULL DEFAULT '',
+                    added_by INTEGER NOT NULL DEFAULT 0,
+                    added_at INTEGER NOT NULL DEFAULT 0,
+                    is_owner INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
-            # Migrate existing items table if columns are missing
+            conn.execute(
+                """
+                INSERT INTO whitelist (discord_user_id, username, added_by, added_at, is_owner)
+                VALUES (?, 'Owner', ?, ?, 1)
+                ON CONFLICT(discord_user_id) DO UPDATE SET is_owner = 1
+                """,
+                (OWNER_DISCORD_ID, OWNER_DISCORD_ID, now),
+            )
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(items)").fetchall()}
             if "source" not in cols:
                 conn.execute("ALTER TABLE items ADD COLUMN source TEXT NOT NULL DEFAULT 'rolimons'")
@@ -165,17 +182,68 @@ class Database:
             if "collectible_item_id" not in cols:
                 conn.execute("ALTER TABLE items ADD COLUMN collectible_item_id TEXT DEFAULT ''")
 
-            # Purge any fake seeded calibration trades from Round 1 (user_a_id in 1001, 2001, 2002, 2003, 9001)
             fake_ids = [
                 r["id"]
                 for r in conn.execute(
-                    "SELECT id FROM trades WHERE user_a_id IN (1001, 2001, 2002, 2003)"
+                    """
+                    SELECT id FROM trades
+                    WHERE user_a_id IN (1001, 2001, 2002, 2003, 888001)
+                       OR items_a_json = items_b_json
+                       OR items_a_json LIKE '%"item_id": 0%'
+                       OR items_b_json LIKE '%"item_id": 0%'
+                    """
                 ).fetchall()
             ]
             if fake_ids:
                 ph = ",".join("?" for _ in fake_ids)
                 conn.execute(f"DELETE FROM trade_items WHERE trade_id IN ({ph})", fake_ids)
                 conn.execute(f"DELETE FROM trades WHERE id IN ({ph})", fake_ids)
+
+    def add_whitelist(self, discord_user_id: int, username: str = "", added_by: int = OWNER_DISCORD_ID) -> None:
+        now = int(time.time())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO whitelist (discord_user_id, username, added_by, added_at, is_owner)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(discord_user_id) DO UPDATE SET
+                    username = CASE WHEN excluded.username != '' THEN excluded.username ELSE whitelist.username END
+                """,
+                (
+                    int(discord_user_id),
+                    str(username),
+                    int(added_by),
+                    now,
+                    1 if int(discord_user_id) == OWNER_DISCORD_ID else 0,
+                ),
+            )
+
+    def remove_whitelist(self, discord_user_id: int) -> bool:
+        if int(discord_user_id) == OWNER_DISCORD_ID:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM whitelist WHERE discord_user_id = ? AND is_owner = 0",
+                (int(discord_user_id),),
+            )
+            return cur.rowcount > 0
+
+    def is_whitelisted(self, discord_user_id: int) -> bool:
+        if int(discord_user_id) == OWNER_DISCORD_ID:
+            return True
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM whitelist WHERE discord_user_id = ?",
+                (int(discord_user_id),),
+            ).fetchone()
+            return row is not None
+
+    def get_whitelisted_users(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM whitelist ORDER BY is_owner DESC, added_at ASC"
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def upsert_items(self, items_dict: Dict[int, Dict[str, Any]]) -> None:
         now = int(time.time())
@@ -194,7 +262,7 @@ class Database:
                 1 if d.get("rare") else 0,
                 d.get("thumbnail_url", ""),
                 d.get("source", "rolimons"),
-                d.get("manual_value"),
+                None,
                 d.get("collectible_item_id", ""),
                 now,
             )
@@ -213,7 +281,6 @@ class Database:
                     acronym=CASE WHEN excluded.acronym != '' THEN excluded.acronym ELSE items.acronym END,
                     rap=CASE WHEN excluded.rap > 0 THEN excluded.rap ELSE items.rap END,
                     value=CASE
-                        WHEN items.manual_value IS NOT NULL THEN items.manual_value
                         WHEN excluded.source = 'rolimons' THEN excluded.value
                         WHEN items.source = 'rolimons' THEN items.value
                         WHEN excluded.value > 0 THEN excluded.value
@@ -233,19 +300,6 @@ class Database:
                 rows,
             )
 
-    def set_manual_item_value(self, item_id: int, manual_val: Optional[int]) -> None:
-        with self._connect() as conn:
-            if manual_val is not None and manual_val >= 0:
-                conn.execute(
-                    "UPDATE items SET manual_value = ?, value = ? WHERE item_id = ?",
-                    (int(manual_val), int(manual_val), int(item_id)),
-                )
-            else:
-                conn.execute(
-                    "UPDATE items SET manual_value = NULL, value = default_value WHERE item_id = ?",
-                    (int(item_id),),
-                )
-
     def update_item_rap_from_scan(self, item_id: int, rap: int) -> None:
         if rap <= 0:
             return
@@ -255,7 +309,7 @@ class Database:
                 UPDATE items
                 SET rap = ?,
                     default_value = CASE WHEN source != 'rolimons' THEN ? ELSE default_value END,
-                    value = CASE WHEN source != 'rolimons' AND manual_value IS NULL THEN ? ELSE value END
+                    value = CASE WHEN source != 'rolimons' THEN ? ELSE value END
                 WHERE item_id = ?
                 """,
                 (rap, rap, rap, item_id),
@@ -279,9 +333,8 @@ class Database:
                 d["rare"] = bool(r["rare"])
                 d["demand_label"] = DEMAND_LABELS.get(int(d.get("demand", -1)), "Unassigned")
                 d["trend_label"] = TREND_LABELS.get(int(d.get("trend", -1)), "Unassigned")
-                d["is_valued"] = (
-                    (d.get("source") == "rolimons" and (d["value"] != d["rap"] or int(d.get("demand", -1)) >= 0))
-                    or (d.get("manual_value") is not None)
+                d["is_valued"] = d.get("source") == "rolimons" and (
+                    d["value"] != d["rap"] or int(d.get("demand", -1)) >= 0
                 )
                 res[r["item_id"]] = d
             return res
@@ -296,27 +349,65 @@ class Database:
                     username = CASE WHEN excluded.username != '' THEN excluded.username ELSE traders.username END,
                     last_ad_at = MAX(traders.last_ad_at, excluded.last_ad_at)
                 """,
-                (user_id, username, ad_time),
+                (int(user_id), str(username), int(ad_time)),
             )
 
     def get_next_traders_to_scan(self, limit: int = 10) -> List[Dict[str, Any]]:
+        now = int(time.time())
+        hot_cutoff = now - 3600
+        rescan_hot_after = now - 45
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 SELECT * FROM traders
-                ORDER BY last_scanned_at ASC, last_ad_at DESC
+                ORDER BY
+                    CASE WHEN last_ad_at >= ? AND last_scanned_at <= ? THEN 0 ELSE 1 END ASC,
+                    last_scanned_at ASC,
+                    last_ad_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (hot_cutoff, rescan_hot_after, limit),
             )
             return [dict(r) for r in cur.fetchall()]
 
     def get_trader_name(self, user_id: int) -> str:
+        uid = int(user_id)
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT username FROM traders WHERE user_id = ?", (user_id,)
+                "SELECT username FROM traders WHERE user_id = ?", (uid,)
             ).fetchone()
-            return row["username"] if row and row["username"] else f"User_{user_id}"
+            if row and row["username"] and not str(row["username"]).startswith("User_"):
+                return str(row["username"])
+        return f"User_{uid}"
+
+    def resolve_missing_trader_names(self, user_ids: List[int]) -> Dict[int, str]:
+        out: Dict[int, str] = {}
+        to_fetch = []
+        with self._connect() as conn:
+            for uid in set(int(x) for x in user_ids if int(x) > 0):
+                row = conn.execute(
+                    "SELECT username FROM traders WHERE user_id = ?", (uid,)
+                ).fetchone()
+                if row and row["username"] and not str(row["username"]).startswith("User_"):
+                    out[uid] = str(row["username"])
+                else:
+                    to_fetch.append(uid)
+        for uid in to_fetch[:12]:
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    f"https://users.roblox.com/v1/users/{uid}",
+                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    uname = str(data.get("name") or "")
+                    if uname:
+                        self.upsert_trader(uid, uname, 0)
+                        out[uid] = uname
+            except Exception:
+                pass
+        return out
 
     def record_inventory_snapshot(
         self, user_id: int, uaid_to_item: Dict[int, int], scanned_at: Optional[int] = None
@@ -324,22 +415,29 @@ class Database:
         now = scanned_at if scanned_at is not None else int(time.time())
         moves: List[Dict[str, int]] = []
         with self._connect() as conn:
+            existing_rows = conn.execute(
+                "SELECT uaid, item_id, user_id, seen_at FROM owners WHERE user_id = ?",
+                (int(user_id),),
+            ).fetchall()
+            prev_owned = {int(r["uaid"]): r for r in existing_rows}
+
             if uaid_to_item:
                 placeholders = ",".join("?" for _ in uaid_to_item)
-                existing_rows = conn.execute(
+                global_rows = conn.execute(
                     f"SELECT uaid, item_id, user_id, seen_at FROM owners WHERE uaid IN ({placeholders})",
                     list(uaid_to_item.keys()),
                 ).fetchall()
-                existing_map = {r["uaid"]: r for r in existing_rows}
+                existing_map = {int(r["uaid"]): r for r in global_rows}
 
                 for uaid, item_id in uaid_to_item.items():
-                    prev = existing_map.get(uaid)
-                    if prev is not None and prev["user_id"] != user_id:
+                    prev = existing_map.get(int(uaid))
+                    if prev is not None and int(prev["user_id"]) != int(user_id):
+                        from_uid = int(prev["user_id"])
                         move = {
-                            "uaid": uaid,
-                            "item_id": item_id,
-                            "from_user_id": prev["user_id"],
-                            "to_user_id": user_id,
+                            "uaid": int(uaid),
+                            "item_id": int(item_id),
+                            "from_user_id": from_uid,
+                            "to_user_id": int(user_id),
                             "detected_at": now,
                         }
                         cur = conn.execute(
@@ -347,10 +445,18 @@ class Database:
                             INSERT INTO uaid_moves (uaid, item_id, from_user_id, to_user_id, detected_at)
                             VALUES (?, ?, ?, ?, ?)
                             """,
-                            (uaid, item_id, prev["user_id"], user_id, now),
+                            (int(uaid), int(item_id), from_uid, int(user_id), now),
                         )
                         move["id"] = cur.lastrowid
                         moves.append(move)
+                        conn.execute(
+                            """
+                            INSERT INTO traders (user_id, username, last_ad_at, last_scanned_at, scan_count)
+                            VALUES (?, '', ?, 0, 0)
+                            ON CONFLICT(user_id) DO UPDATE SET last_ad_at = MAX(traders.last_ad_at, ?)
+                            """,
+                            (from_uid, now, now),
+                        )
 
                 conn.executemany(
                     """
@@ -361,16 +467,77 @@ class Database:
                         user_id = excluded.user_id,
                         seen_at = excluded.seen_at
                     """,
-                    [(uaid, item_id, user_id, now) for uaid, item_id in uaid_to_item.items()],
+                    [(int(uaid), int(item_id), int(user_id), now) for uaid, item_id in uaid_to_item.items()],
                 )
+
+            incoming_counterparties = {int(m["from_user_id"]) for m in moves if int(m["from_user_id"]) > 0}
+            if len(incoming_counterparties) != 1:
+                recent_in = conn.execute(
+                    """
+                    SELECT DISTINCT from_user_id FROM uaid_moves
+                    WHERE to_user_id = ? AND detected_at >= ? AND matched_trade_id IS NULL AND from_user_id > 0
+                    """,
+                    (int(user_id), now - 600),
+                ).fetchall()
+                for r in recent_in:
+                    incoming_counterparties.add(int(r["from_user_id"]))
+
+            recent_out_recipients = conn.execute(
+                """
+                SELECT DISTINCT to_user_id FROM uaid_moves
+                WHERE from_user_id = ? AND detected_at >= ? AND matched_trade_id IS NULL AND to_user_id > 0
+                """,
+                (int(user_id), now - 600),
+            ).fetchall()
+            for r in recent_out_recipients:
+                incoming_counterparties.add(int(r["to_user_id"]))
+
+            current_uaids = {int(u) for u in (uaid_to_item or {}).keys()}
+            departed_uaids = [u for u in prev_owned.keys() if u not in current_uaids]
+            if departed_uaids and len(incoming_counterparties) == 1:
+                target_cp = next(iter(incoming_counterparties))
+                for dep_uaid in departed_uaids[:4]:
+                    dep_row = prev_owned[dep_uaid]
+                    dep_iid = int(dep_row["item_id"])
+                    already = conn.execute(
+                        """
+                        SELECT 1 FROM uaid_moves
+                        WHERE uaid = ? AND from_user_id = ? AND detected_at >= ?
+                        """,
+                        (dep_uaid, int(user_id), now - 900),
+                    ).fetchone()
+                    if not already:
+                        cur = conn.execute(
+                            """
+                            INSERT INTO uaid_moves (uaid, item_id, from_user_id, to_user_id, detected_at)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (dep_uaid, dep_iid, int(user_id), target_cp, now),
+                        )
+                        moves.append(
+                            {
+                                "id": cur.lastrowid,
+                                "uaid": dep_uaid,
+                                "item_id": dep_iid,
+                                "from_user_id": int(user_id),
+                                "to_user_id": target_cp,
+                                "detected_at": now,
+                            }
+                        )
+                        conn.execute(
+                            "UPDATE owners SET user_id = ?, seen_at = ? WHERE uaid = ?",
+                            (target_cp, now, dep_uaid),
+                        )
 
             conn.execute(
                 """
                 UPDATE traders
-                SET last_scanned_at = ?, scan_count = scan_count + 1
+                SET last_scanned_at = ?,
+                    scan_count = scan_count + 1,
+                    last_ad_at = CASE WHEN ? > 0 THEN ? ELSE last_ad_at END
                 WHERE user_id = ?
                 """,
-                (now, user_id),
+                (now, len(moves), now, int(user_id)),
             )
         return moves
 
@@ -407,6 +574,18 @@ class Database:
     ) -> int:
         now = detected_at if detected_at is not None else int(time.time())
         with self._connect() as conn:
+            dup = conn.execute(
+                """
+                SELECT id FROM trades
+                WHERE user_a_name = ? AND user_b_name = ?
+                  AND value_a = ? AND value_b = ?
+                  AND ABS(detected_at - ?) <= 86400
+                LIMIT 1
+                """,
+                (user_a_name, user_b_name, value_a, value_b, now),
+            ).fetchone()
+            if dup:
+                return int(dup["id"])
             cur = conn.execute(
                 """
                 INSERT INTO trades (
@@ -436,6 +615,9 @@ class Database:
             trade_id = cur.lastrowid
 
             for idx, it in enumerate(items_a):
+                iid_a = int(it.get("item_id", 0))
+                if iid_a <= 0:
+                    continue
                 share = (it["value"] / value_a) if value_a > 0 else (1.0 / len(items_a))
                 realized_op = int(round((value_b - value_a) * share))
                 conn.execute(
@@ -447,7 +629,7 @@ class Database:
                     """,
                     (
                         trade_id,
-                        it["item_id"],
+                        iid_a,
                         it.get("uaid", idx),
                         it["value"],
                         it["rap"],
@@ -459,6 +641,9 @@ class Database:
                 )
 
             for idx, it in enumerate(items_b):
+                iid_b = int(it.get("item_id", 0))
+                if iid_b <= 0:
+                    continue
                 share = (it["value"] / value_b) if value_b > 0 else (1.0 / len(items_b))
                 realized_op = int(round((value_a - value_b) * share))
                 conn.execute(
@@ -470,7 +655,7 @@ class Database:
                     """,
                     (
                         trade_id,
-                        it["item_id"],
+                        iid_b,
                         it.get("uaid", idx),
                         it["value"],
                         it["rap"],
@@ -512,22 +697,84 @@ class Database:
                 d = dict(r)
                 d["items_a"] = json.loads(d["items_a_json"])
                 d["items_b"] = json.loads(d["items_b_json"])
+                if (
+                    not d["items_a"]
+                    or not d["items_b"]
+                    or any(int(x.get("item_id", 0)) <= 0 for x in d["items_a"] + d["items_b"])
+                ):
+                    continue
+                if not d.get("user_a_name") or str(d["user_a_name"]).startswith("User_"):
+                    d["user_a_name"] = self.get_trader_name(int(d["user_a_id"]))
+                if not d.get("user_b_name") or str(d["user_b_name"]).startswith("User_"):
+                    d["user_b_name"] = self.get_trader_name(int(d["user_b_id"]))
                 results.append(d)
             return results
 
-    def get_recent_trades(self, limit: int = 25) -> List[Dict[str, Any]]:
+    def get_recent_trades(self, limit: int = 25, offset: int = 0) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM trades ORDER BY detected_at DESC, id DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM trades ORDER BY detected_at DESC, id DESC LIMIT ? OFFSET ?",
+                (int(limit), int(offset)),
             ).fetchall()
             res = []
             for r in rows:
                 d = dict(r)
                 d["items_a"] = json.loads(d["items_a_json"])
                 d["items_b"] = json.loads(d["items_b_json"])
+                if (
+                    not d["items_a"]
+                    or not d["items_b"]
+                    or any(int(x.get("item_id", 0)) <= 0 for x in d["items_a"] + d["items_b"])
+                ):
+                    continue
+                if not d.get("user_a_name") or str(d["user_a_name"]).startswith("User_"):
+                    d["user_a_name"] = self.get_trader_name(int(d["user_a_id"]))
+                if not d.get("user_b_name") or str(d["user_b_name"]).startswith("User_"):
+                    d["user_b_name"] = self.get_trader_name(int(d["user_b_id"]))
                 res.append(d)
             return res
+
+    def get_total_trades_count(self) -> int:
+        with self._connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0])
+
+    def get_item_hoard_stats(self, item_id: int) -> Dict[str, Any]:
+        with self._connect() as conn:
+            total_tracked = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM owners WHERE item_id = ?", (int(item_id),)
+                ).fetchone()[0]
+            )
+            if total_tracked <= 0:
+                return {
+                    "total_tracked": 0,
+                    "hoarder_count": 0,
+                    "hoarded_copies": 0,
+                    "hoard_percent": 0.0,
+                    "top_hoard_count": 0,
+                }
+            rows = conn.execute(
+                """
+                SELECT user_id, COUNT(*) AS cnt
+                FROM owners
+                WHERE item_id = ?
+                GROUP BY user_id
+                HAVING cnt >= 3
+                ORDER BY cnt DESC
+                """,
+                (int(item_id),),
+            ).fetchall()
+            hoarder_count = len(rows)
+            hoarded_copies = sum(int(r["cnt"]) for r in rows)
+            top_hoard_count = int(rows[0]["cnt"]) if rows else 0
+            hoard_pct = round((hoarded_copies / max(1, total_tracked)) * 100.0, 1)
+            return {
+                "total_tracked": total_tracked,
+                "hoarder_count": hoarder_count,
+                "hoarded_copies": hoarded_copies,
+                "hoard_percent": hoard_pct,
+                "top_hoard_count": top_hoard_count,
+            }
 
     def get_sales_cache(self, item_id: int, max_age_seconds: int = 1800) -> Optional[Dict[str, Any]]:
         now = int(time.time())
@@ -584,7 +831,6 @@ class Database:
         for a in activities:
             old_r = int(a["old_rap"])
             new_r = int(a["new_rap"])
-            # Roblox RAP formula: new_rap = old_rap * 0.9 + sale_price * 0.1 -> sale_price ≈ new_rap * 10 - old_rap * 9
             est_price = max(1, (new_r * 10) - (old_r * 9))
             rows.append(
                 (
