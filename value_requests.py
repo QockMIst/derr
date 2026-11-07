@@ -780,6 +780,7 @@ def save_parsed_value_request_proof(
         op_rap=int(parsed["op_rap"]),
         trade_type=str(parsed.get("trade_type", "SWAP")),
         detected_at=now,
+        source="value_requests",
     )
 
 
