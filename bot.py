@@ -1,3 +1,5 @@
+from collections import defaultdict
+import re
 import asyncio
 import io
 import os
