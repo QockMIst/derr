@@ -28,7 +28,7 @@ from app import (
 from db import OWNER_DISCORD_ID
 from oplookup import compute_op_lookup, resolve_model_label
 from proofs import find_item_by_query, format_k, format_relative_time, get_item_proofs_formatted
-from render import render_trade_card_png
+from render import render_trade_card_png, render_user_profile_graph
 from sniper import AdSniper
 from suggest import generate_trade_suggestions
 from value_requests import parse_value_request_text, save_parsed_value_request_proof
@@ -203,11 +203,11 @@ class PaginatedProofsView(discord.ui.View):
                 uname_b = resolved[uid_b]
                 p["user_b_name"] = uname_b
 
-        sa = ", ".join(
-            f"**{x['name']}** (`{x.get('value', 0):,}`)" for x in p["items_a"]
+        sa = "\n".join(
+            f"- **{x['name']}** ({x.get('value', 0):,})" for x in p["items_a"]
         )
-        sb = ", ".join(
-            f"**{x['name']}** (`{x.get('value', 0):,}`)" for x in p["items_b"]
+        sb = "\n".join(
+            f"- **{x['name']}** ({x.get('value', 0):,})" for x in p["items_b"]
         )
         op_diff = int(p.get("value_b", 0)) - int(p.get("value_a", 0))
         op_abs = int(p.get("op_value", abs(op_diff)))
@@ -890,6 +890,333 @@ async def cmd_sniper(
             ),
             inline=False,
         )
+    _apply_footer(embed)
+    await interaction.followup.send(embed=embed)
+
+
+@client.tree.command(name="user", description="Inspect a Roblox trader profile, limiteds valuation, rank, and history graph")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(user="Roblox username or numeric User ID")
+async def cmd_user(interaction: discord.Interaction, user: str) -> None:
+    if not _check_whitelisted(interaction):
+        await interaction.response.send_message("Access denied: You are not whitelisted on Carbon.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+    resolved = await asyncio.to_thread(roblox.resolve_user, user)
+    if not resolved:
+        await interaction.followup.send(f"Could not find Roblox user `{user}`.", ephemeral=True)
+        return
+
+    uid = resolved["user_id"]
+    uname = resolved["username"]
+
+    created_date = "Unknown"
+    try:
+        req = urllib.request.Request(f"https://users.roblox.com/v1/users/{uid}", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            udata = json.loads(r.read().decode())
+            created_raw = udata.get("created", "")
+            if created_raw:
+                created_date = created_raw.split("T")[0]
+    except Exception:
+        pass
+
+    avatar_url = ""
+    try:
+        req = urllib.request.Request(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={uid}&size=150x150&format=Png&isCircular=false", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            tdata = json.loads(r.read().decode())
+            avatar_url = tdata.get("data", [{}])[0].get("imageUrl", "")
+    except Exception:
+        pass
+
+    rap_map: Dict[int, int] = {}
+    uaids = await asyncio.to_thread(roblox.fetch_collectibles, uid, rap_map) or {}
+    owned_items = [ITEMS_CATALOG[aid] for aid in uaids.values() if aid in ITEMS_CATALOG]
+    owned_items.sort(key=lambda x: (int(x.get("value", 0)), int(x.get("rap", 0))), reverse=True)
+
+    tot_val = sum(int(x.get("value", 0)) for x in owned_items)
+    tot_rap = sum(int(x.get("rap", 0)) for x in owned_items)
+
+    await asyncio.to_thread(poll_rolimons_ads_once)
+    ads_count = sum(1 for a in RECENT_RAW_ADS if int(a[2]) == uid)
+
+    top5_lines = []
+    for it in owned_items[:5]:
+        v = int(it.get("value", 0))
+        top5_lines.append(f"• **{it['name']}** - `{format_k(v)} R$`")
+
+    top5_str = "\n".join(top5_lines) if top5_lines else "*No public limiteds found.*"
+
+    desc = (
+        f"**Value**\n`{format_k(tot_val)} R$`\n\n"
+        f"**RAP**\n`{format_k(tot_rap)} R$`\n\n"
+        f"**Limiteds**\n`{len(owned_items)}`\n\n"
+        f"**Trade Ads**\n`{ads_count}`\n\n"
+        f"**ID**\n`{uid}`\n\n"
+        f"**Joined**\n`{created_date}`\n\n"
+        f"**Top 5 Items**\n{top5_str}"
+    )
+
+    embed = discord.Embed(
+        title=f"{uname}'s Profile",
+        description=desc,
+        color=0x3B82F6,
+    )
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+
+    _apply_footer(embed)
+
+    graph_png = await asyncio.to_thread(render_user_profile_graph, uname, tot_val, tot_rap)
+    fname = f"profile_{uid}.png"
+    file = discord.File(io.BytesIO(graph_png), filename=fname)
+    embed.set_image(url=f"attachment://{fname}")
+
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Profile", url=f"https://www.roblox.com/users/{uid}/profile", style=discord.ButtonStyle.link))
+    view.add_item(discord.ui.Button(label="Rolimons", url=f"https://www.rolimons.com/player/{uid}", style=discord.ButtonStyle.link))
+    view.add_item(discord.ui.Button(label="Trade Ads", url=f"https://www.rolimons.com/tradeads?player={uid}", style=discord.ButtonStyle.link))
+    view.add_item(discord.ui.Button(label="Send Trade", url=f"https://www.roblox.com/trades/send?userId={uid}", style=discord.ButtonStyle.link))
+
+    await interaction.followup.send(embed=embed, file=file, view=view)
+
+
+@client.tree.command(name="predict", description="Predict whether an item is close to raising, lowering, or stable with Carbon Models")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(
+    item="Item name, acronym, or ID",
+    target="Optional expectation or target: close to raise, close to decrease, or stable",
+    model="Select Carbon valuation model",
+)
+@app_commands.choices(
+    target=[
+        app_commands.Choice(name="Close to Raise", value="raise"),
+        app_commands.Choice(name="Close to Decrease", value="decrease"),
+        app_commands.Choice(name="Stable", value="stable"),
+    ],
+    model=MODEL_CHOICES,
+)
+async def cmd_predict(
+    interaction: discord.Interaction,
+    item: str,
+    target: Optional[str] = None,
+    model: str = "star",
+) -> None:
+    if not _check_whitelisted(interaction):
+        await interaction.response.send_message("Access denied: You are not whitelisted on Carbon.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+    found = find_item_by_query(item, ITEMS_CATALOG)
+    if not found:
+        await interaction.followup.send(f"Item `{item}` not found.", ephemeral=True)
+        return
+
+    item_id = found["item_id"]
+    d = await asyncio.to_thread(
+        compute_op_lookup,
+        db,
+        item_id,
+        ITEMS_CATALOG,
+        RECENT_RAW_ADS,
+        sales_client,
+        30,
+        model,
+    )
+    it = d["item"]
+    base_val = int(it.get("value", 0))
+    rap = int(it.get("rap", 0))
+    avg_op = int(d.get("avg_op", 0))
+    demand = int(it.get("demand", -1))
+    trend = int(it.get("trend", -1))
+
+    sales_summary = sales_client.fetch_item_sales_summary(db, item_id, it) if sales_client else {}
+    avg_price_7d = sales_summary.get("avg_price_7d", 0)
+    lowest_resale = sales_summary.get("lowest_resale", 0)
+    vol = sales_summary.get("daily_volume", 0.0)
+
+    score = 0
+    factors = []
+
+    if demand >= 3:
+        score += 2
+        factors.append("🟢 **High/Amazing Demand**: Accelerates trade circulation and buyer competition.")
+    elif demand in (0, 1):
+        score -= 2
+        factors.append("🔴 **Low/Terrible Demand**: Slower buyer interest increases drop probability.")
+
+    if avg_op >= 4000:
+        score += 3
+        factors.append(f"🟢 **Strong Proof Overpay (`+{avg_op:,}` OP)**: Traders consistently paying above Rolimons value.")
+    elif avg_op <= -4000:
+        score -= 3
+        factors.append(f"🔴 **Negative Overpay / Underpay (`{avg_op:,}` OP)**: Item being discounted in recent proofs.")
+
+    if lowest_resale and base_val > 0:
+        ratio = lowest_resale / float(base_val)
+        if ratio > 1.15:
+            score += 2
+            factors.append(f"🟢 **Elevated Resale Floor**: Lowest copy listed at `{lowest_resale:,}` R$ (above base value).")
+        elif ratio < 0.82:
+            score -= 2
+            factors.append(f"🔴 **Depressed Resale Floor**: Lowest copy listed at `{lowest_resale:,}` R$ (below base value).")
+
+    if trend == 3:
+        score += 2
+        factors.append("🟢 **Rolimons Trend: Raising**.")
+    elif trend == 0:
+        score -= 2
+        factors.append("🔴 **Rolimons Trend: Lowering**.")
+
+    if score >= 3:
+        prediction = "CLOSE TO RAISE 📈"
+        p_color = 0x22C55E
+        confidence = "High" if score >= 5 else "Moderate"
+    elif score <= -3:
+        prediction = "CLOSE TO DECREASE 📉"
+        p_color = 0xF43F5E
+        confidence = "High" if score <= -5 else "Moderate"
+    else:
+        prediction = "STABLE ⚖️"
+        p_color = 0x0EA5E9
+        confidence = "Solid"
+
+    align_text = ""
+    if target:
+        t_key = "raise" if "raise" in prediction.lower() else ("decrease" if "decrease" in prediction.lower() else "stable")
+        match_icon = "✅" if target == t_key else "❌"
+        align_text = f"\n**Target Check ({target.upper()})**: {match_icon} Model verdict aligns: **{target == t_key}**\n"
+
+    desc = (
+        f"💎 **Item**: **{it['name']}** (`{base_val:,}` Val / `{rap:,}` RAP)\n"
+        f"🧠 **Model**: `{d.get('model_name')}`\n"
+        f"🔮 **Prediction**: **`{prediction}`** (Confidence: **{confidence}**)\n"
+        f"{align_text}\n"
+        f"📊 **Market Indicators & Driving Factors**:\n"
+        + "\n".join(f"- {f}" for f in factors)
+        + f"\n\n**Key Metrics**:\n"
+        f"- Recent Median OP: **`{avg_op:+,}`**\n"
+        f"- Daily Sales Volume: **`{vol:.1f}/day`**\n"
+        f"- 7-Day Average Price: **`{avg_price_7d:,}` R$**\n"
+        f"- Lowest Resale: **`{lowest_resale:,}` R$**"
+    )
+
+    embed = discord.Embed(
+        title=f"🔮 Carbon Market Predictor: {it['name']}",
+        description=desc,
+        color=p_color,
+    )
+    if it.get("thumbnail_url"):
+        embed.set_thumbnail(url=it["thumbnail_url"])
+    _apply_footer(embed)
+    await interaction.followup.send(embed=embed)
+
+
+@client.tree.command(name="matchingowners", description="Find traders owning exact item criteria (e.g. 'fafa 2, legit 3+, sta 2-')")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(query="Comma-separated rules (e.g. 'fafa 2, legit 3+, sta 2-')")
+async def cmd_matchingowners(interaction: discord.Interaction, query: str) -> None:
+    if not _check_whitelisted(interaction):
+        await interaction.response.send_message("Access denied: You are not whitelisted on Carbon.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+    parts = [p.strip() for p in query.split(",") if p.strip()]
+    rules = []
+    for p in parts:
+        m = re.match(r"^(.*?)\s*(\d+)\s*([+-])?$", p)
+        if not m:
+            continue
+        name_part = m.group(1).strip()
+        cnt = int(m.group(2))
+        op = m.group(3) or ""
+        it = find_item_by_query(name_part, ITEMS_CATALOG)
+        if it:
+            rules.append({"item": it, "count": cnt, "op": op})
+
+    if not rules:
+        await interaction.followup.send(
+            "Could not parse query. Example format: `/matchingowners fafa 2, legit 3+, sta 2-`",
+            ephemeral=True,
+        )
+        return
+
+    def find_owners():
+        conn = db._connect()
+        user_counts = defaultdict(lambda: defaultdict(int))
+        for r in rules:
+            iid = r["item"]["item_id"]
+            rows = conn.execute("SELECT user_id FROM owners WHERE item_id = ?", (iid,)).fetchall()
+            for row in rows:
+                user_counts[row["user_id"]][iid] += 1
+
+        matched_users = []
+        for uid, counts in user_counts.items():
+            if uid <= 1000:
+                continue
+            fits = True
+            for r in rules:
+                iid = r["item"]["item_id"]
+                c = counts.get(iid, 0)
+                if r["op"] == "+":
+                    if c < r["count"]:
+                        fits = False
+                        break
+                elif r["op"] == "-":
+                    if c > r["count"]:
+                        fits = False
+                        break
+                else:
+                    if c != r["count"]:
+                        fits = False
+                        break
+            if fits:
+                matched_users.append(uid)
+        return matched_users
+
+    matched_uids = await asyncio.to_thread(find_owners)
+
+    if not matched_uids:
+        await interaction.followup.send(
+            f"No matching traders found in database matching: `{query}`.",
+            ephemeral=True,
+        )
+        return
+
+    await asyncio.to_thread(poll_rolimons_ads_once)
+    resolved_names = await asyncio.to_thread(db.resolve_missing_trader_names, matched_uids[:5])
+
+    rule_str = "\n".join(f"- **{r['item']['name']}** (Owns {r['count']}{r['op']})" for r in rules)
+    embed = discord.Embed(
+        title=f"🎯 Matching Owners Found ({len(matched_uids)} Traders)",
+        description=f"**Criteria**:\n{rule_str}\n\n**Showing Top Matching Traders**:",
+        color=0x22C55E,
+    )
+
+    for uid in matched_uids[:5]:
+        uname = resolved_names.get(uid) or f"User_{uid}"
+        user_ads = [a for a in RECENT_RAW_ADS if int(a[2]) == uid][:3]
+        ad_lines = []
+        for ad in user_ads:
+            sends = [ITEMS_CATALOG[x]["name"] for x in ad[4].get("items", []) if x in ITEMS_CATALOG]
+            wants = [ITEMS_CATALOG[x]["name"] for x in ad[5].get("items", []) if x in ITEMS_CATALOG]
+            ad_lines.append(f"• Sends `{', '.join(sends) or 'Any'}` ⇄ Wants `{', '.join(wants) or 'Any'}`")
+
+        ad_text = "\n".join(ad_lines) if ad_lines else "*No active trade ads posted recently.*"
+        embed.add_field(
+            name=f"👤 {uname} (`{uid}`)",
+            value=(
+                f"[Rolimons Profile](https://www.rolimons.com/player/{uid}) | [Send Trade](https://www.roblox.com/trades/send?userId={uid})\n"
+                f"**Last Trade Ads**:\n{ad_text}"
+            ),
+            inline=False,
+        )
+
     _apply_footer(embed)
     await interaction.followup.send(embed=embed)
 

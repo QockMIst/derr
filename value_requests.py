@@ -165,10 +165,10 @@ def _extract_items_from_boxes(
     gave_y = None
     recv_y = None
     for b, t in boxes:
-        tl = t.lower()
-        if "items you gave" in tl:
+        tl = re.sub(r"\s+", "", t.lower())
+        if "itemsyougave" in tl:
             gave_y = b[2]
-        elif "items you received" in tl:
+        elif "itemsyoureceived" in tl:
             recv_y = b[2]
 
     if gave_y is None or recv_y is None:
@@ -178,15 +178,17 @@ def _extract_items_from_boxes(
         slots: List[Dict[str, Any]] = []
         for box, text in lines:
             tl = text.lower()
-            if any(skip in tl for skip in ("total value", "robux offered", "items you", "trade with")):
+            if any(skip in tl for skip in ("total value", "totalvalue", "robux offered", "items you", "itemsyou", "trade with", "tradewith")):
                 continue
-            if re.match(r"^[米茶#\d\s\W]+$", text) or re.match(r"^[QO0]?\s*[\d,.]+$", text):
+            if re.match(r"^[米茶#\d\s\W]+$", text) or re.match(r"^[QO0≥]?\s*[\d,.]+$", text):
+                continue
+            if re.search(r"[-+]\d+.*?(?:rap|value)", tl):
                 continue
             cx = (box[0] + box[1]) / 2.0
             cy = (box[2] + box[3]) / 2.0
             placed = False
             for s in slots:
-                if abs(s["cx"] - cx) < 95 and abs(s["cy"] - cy) < 145:
+                if abs(s["cx"] - cx) < 85 and abs(s["cy"] - cy) < 130:
                     s["lines"].append((cy, text))
                     s["cy"] = (s["cy"] + cy) / 2.0
                     placed = True
@@ -197,7 +199,10 @@ def _extract_items_from_boxes(
         for s in slots:
             s["lines"].sort(key=lambda x: x[0])
             comb = " ".join(l[1] for l in s["lines"]).strip()
-            it = _strict_item_match(comb, items_catalog)
+            comb_spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", comb)
+            it = _strict_item_match(comb_spaced, items_catalog)
+            if not it:
+                it = _strict_item_match(comb, items_catalog)
             if it and len(matched) < 8:
                 matched.append(it)
         return matched
