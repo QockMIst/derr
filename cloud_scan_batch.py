@@ -214,6 +214,11 @@ def match_pending(conn: sqlite3.Connection, items_catalog: Dict[int, Dict[str, A
         if not clean_a or not clean_b:
             continue
 
+        ts_a = max(m["detected_at"] for m in clean_a)
+        ts_b = max(m["detected_at"] for m in clean_b)
+        if abs(ts_a - ts_b) > 300:
+            continue
+
         side_a = clean_a[:4]
         side_b = clean_b[:4]
 
