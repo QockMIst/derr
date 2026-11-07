@@ -1118,11 +1118,26 @@ async def cmd_predict(
     await interaction.followup.send(embed=embed)
 
 
+SORT_WEALTH_CHOICES = [
+    app_commands.Choice(name="Top 3 Richest Traders (Most Wealth)", value="richest"),
+    app_commands.Choice(name="Top 3 Least Rich Traders (Lowest Wealth)", value="least_rich"),
+    app_commands.Choice(name="Default Matching Traders", value="default"),
+]
+
+
 @client.tree.command(name="matchingowners", description="Find traders owning exact item criteria (e.g. 'fafa 2, legit 3+, sta 2-')")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@app_commands.describe(query="Comma-separated rules (e.g. 'fafa 2, legit 3+, sta 2-')")
-async def cmd_matchingowners(interaction: discord.Interaction, query: str) -> None:
+@app_commands.describe(
+    query="Comma-separated rules (e.g. 'fafa 2, legit 3+, sta 2-')",
+    sort_by="Sort by top 3 richest or top 3 least rich players holding these items",
+)
+@app_commands.choices(sort_by=SORT_WEALTH_CHOICES)
+async def cmd_matchingowners(
+    interaction: discord.Interaction,
+    query: str,
+    sort_by: str = "default",
+) -> None:
     if not _check_whitelisted(interaction):
         await interaction.response.send_message("Access denied: You are not whitelisted on Carbon.", ephemeral=True)
         return
@@ -1190,19 +1205,47 @@ async def cmd_matchingowners(interaction: discord.Interaction, query: str) -> No
         )
         return
 
+    def calculate_wealth(uids):
+        conn = db._connect()
+        wealth_map = {}
+        for u in uids:
+            rows = conn.execute("SELECT item_id FROM owners WHERE user_id = ?", (u,)).fetchall()
+            w = sum(int(ITEMS_CATALOG.get(r["item_id"], {}).get("value", 0)) for r in rows)
+            wealth_map[u] = w
+        return wealth_map
+
+    user_wealth = await asyncio.to_thread(calculate_wealth, matched_uids)
+
+    if sort_by == "richest":
+        target_uids = sorted(matched_uids, key=lambda u: user_wealth.get(u, 0), reverse=True)[:3]
+        sort_label = "🏆 Top 3 Richest Traders"
+    elif sort_by == "least_rich":
+        target_uids = sorted(matched_uids, key=lambda u: user_wealth.get(u, 0))[:3]
+        sort_label = "📉 Top 3 Least Rich Traders"
+    else:
+        target_uids = matched_uids[:3]
+        sort_label = "Top Matching Traders"
+
     await asyncio.to_thread(poll_rolimons_ads_once)
-    resolved_names = await asyncio.to_thread(db.resolve_missing_trader_names, matched_uids[:5])
+    resolved_names = await asyncio.to_thread(db.resolve_missing_trader_names, target_uids)
+    headshots = await asyncio.to_thread(roblox.fetch_user_headshots, target_uids)
+
+    item_imgs = [r["item"].get("thumbnail_url") for r in rules if r["item"].get("thumbnail_url")]
+    first_item_img = item_imgs[0] if item_imgs else None
 
     rule_str = "\n".join(f"- **{r['item']['name']}** (Owns {r['count']}{r['op']})" for r in rules)
     embed = discord.Embed(
-        title=f"🎯 Matching Owners Found ({len(matched_uids)} Traders)",
-        description=f"**Criteria**:\n{rule_str}\n\n**Showing Top Matching Traders**:",
+        title=f"🎯 Matching Owners Found ({len(matched_uids)} Total)",
+        description=f"**Criteria**:\n{rule_str}\n\n**{sort_label}**:",
         color=0x22C55E,
     )
+    if first_item_img:
+        embed.set_thumbnail(url=first_item_img)
 
-    for uid in matched_uids[:5]:
+    for uid in target_uids:
         uname = resolved_names.get(uid) or f"User_{uid}"
-        user_ads = [a for a in RECENT_RAW_ADS if int(a.get("user_id", a.get("player_id", 0)) if isinstance(a, dict) else a[2]) == uid][:3]
+        w_val = user_wealth.get(uid, 0)
+        user_ads = [a for a in RECENT_RAW_ADS if int(a.get("user_id", a.get("player_id", 0)) if isinstance(a, dict) else a[2]) == uid][:2]
         ad_lines = []
         for ad in user_ads:
             s_items = ad.get("offer_items", []) if isinstance(ad, dict) else ad[4].get("items", [])
@@ -1212,10 +1255,12 @@ async def cmd_matchingowners(interaction: discord.Interaction, query: str) -> No
             ad_lines.append(f"• Sends `{', '.join(sends) or 'Any'}` ⇄ Wants `{', '.join(wants) or 'Any'}`")
 
         ad_text = "\n".join(ad_lines) if ad_lines else "*No active trade ads posted recently.*"
+        avatar_url = headshots.get(uid, "")
+        avatar_link = f" • [Avatar Headshot]({avatar_url})" if avatar_url else ""
         embed.add_field(
-            name=f"👤 {uname} (`{uid}`)",
+            name=f"👤 {uname} (`{uid}`) — Wealth: `{format_k(w_val)} R$`",
             value=(
-                f"[Rolimons Profile](https://www.rolimons.com/player/{uid}) | [Send Trade](https://www.roblox.com/trades/send?userId={uid})\n"
+                f"[Rolimons Profile](https://www.rolimons.com/player/{uid}) | [Send Trade](https://www.roblox.com/trades/send?userId={uid}){avatar_link}\n"
                 f"**Last Trade Ads**:\n{ad_text}"
             ),
             inline=False,
