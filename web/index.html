@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Carbon</title>
+  <style>
+    :root {
+      --bg-base: #0a0f18;
+      --bg-panel: #111927;
+      --bg-card: #182336;
+      --bg-hover: #21304a;
+      --border: #2a3d5e;
+      --border-light: #3b5582;
+      --text-main: #ffffff;
+      --text-sub: #d8e4f5;
+      --text-muted: #9eb3cf;
+      --accent: #0ea5e9;
+      --accent-hover: #0284c7;
+      --accent-light: #38bdf8;
+      --accent-glow: rgba(14, 165, 233, 0.22);
+      --green: #22c55e;
+      --green-bg: rgba(34, 197, 94, 0.16);
+      --red: #f43f5e;
+      --red-bg: rgba(244, 63, 94, 0.16);
+      --amber: #f59e0b;
+      --amber-bg: rgba(245, 158, 11, 0.16);
+      --font-sans: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
+      --font-mono: 'Consolas', 'SFMono-Regular', Menlo, Monaco, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      font-size: 15px;
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    header {
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #38bdf8 0%, #0284c7 55%, #1d4ed8 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 900;
+      font-size: 25px;
+      color: #ffffff;
+      box-shadow: 0 0 22px rgba(14, 165, 233, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+    }
+
+    .brand-title {
+      font-weight: 800;
+      font-size: 21px;
+      color: #ffffff;
+    }
+
+    .brand-sub {
+      font-size: 12px;
+      color: var(--accent-light);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    .stats-bar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .stat-pill {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 7px 14px;
+      border-radius: 7px;
+      font-size: 13.5px;
+      color: var(--text-sub);
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .stat-pill strong {
+      color: var(--accent-light);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .nav-tabs {
+      display: flex;
+      gap: 8px;
+      padding: 12px 28px 0;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-panel);
+    }
+
+    .tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-sub);
+      font-family: inherit;
+      font-size: 14.5px;
+      font-weight: 700;
+      padding: 12px 20px;
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+      border-radius: 6px 6px 0 0;
+      transition: all 0.15s ease;
+    }
+
+    .tab-btn:hover {
+      color: #ffffff;
+      background: rgba(14, 165, 233, 0.1);
+    }
+
+    .tab-btn.active {
+      color: #ffffff;
+      border-bottom-color: var(--accent-light);
+      background: var(--accent-glow);
+    }
+
+    main {
+      flex: 1;
+      max-width: 1460px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 22px 28px;
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+    }
+
+    .card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .card-title {
+      font-size: 18px;
+      font-weight: 800;
+      color: #ffffff;
+    }
+
+    .card-desc {
+      font-size: 13.5px;
+      color: var(--text-sub);
+      margin-top: 3px;
+    }
+
+    .btn {
+      background: var(--accent);
+      color: #ffffff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      padding: 9px 16px;
+      border-radius: 7px;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn:hover {
+      background: var(--accent-hover);
+    }
+
+    .btn-secondary {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      color: #ffffff;
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-hover);
+      border-color: var(--accent-light);
+    }
+
+    input[type="text"], input[type="number"], select {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      color: #ffffff;
+      padding: 9px 13px;
+      border-radius: 7px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      outline: none;
+    }
+
+    input::placeholder {
+      color: var(--text-muted);
+    }
+
+    input[type="text"]:focus, input[type="number"]:focus, select:focus {
+      border-color: var(--accent-light);
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25);
+    }
+
+    .item-thumb {
+      width: 42px;
+      height: 42px;
+      border-radius: 7px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-light);
+      object-fit: contain;
+      flex-shrink: 0;
+    }
+
+    .item-thumb-sm {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      object-fit: contain;
+      flex-shrink: 0;
+    }
+
+    .item-row-flex {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .sniper-controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .deals-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+      gap: 16px;
+    }
+
+    .deal-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .deal-card:hover {
+      border-color: var(--accent-light);
+    }
+
+    .deal-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .badge {
+      padding: 4px 10px;
+      border-radius: 5px;
+      font-size: 12.5px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+
+    .badge-win { background: var(--green-bg); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.45); }
+    .badge-loss { background: var(--red-bg); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.45); }
+    .badge-fair { background: var(--amber-bg); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.45); }
+    .badge-info { background: var(--accent-glow); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.45); }
+
+    .trade-sides {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .side-box {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .side-label {
+      font-size: 12.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-sub);
+      margin-bottom: 10px;
+      font-weight: 800;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .item-line {
+      font-size: 13.5px;
+      color: #ffffff;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-weight: 500;
+    }
+
+    .item-line:last-child {
+      border-bottom: none;
+    }
+
+    .mono {
+      font-family: var(--font-mono);
+    }
+
+    .builder-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .slot-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 12px;
+      min-height: 165px;
+    }
+
+    .slot-item {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 7px;
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .robux-bar {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .robux-bar label {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-sub);
+    }
+
+    .search-dropdown {
+      position: relative;
+      width: 100%;
+    }
+
+    .search-results {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: var(--bg-card);
+      border: 2px solid var(--accent);
+      border-radius: 7px;
+      max-height: 310px;
+      overflow-y: auto;
+      z-index: 50;
+      display: none;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.85);
+    }
+
+    .search-results.open {
+      display: block;
+    }
+
+    .search-option {
+      padding: 9px 14px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 14px;
+      color: #ffffff;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .search-option:hover {
+      background: var(--bg-hover);
+    }
+
+    .tc-layout {
+      display: grid;
+      grid-template-columns: 1.25fr 0.75fr;
+      gap: 20px;
+      margin-top: 18px;
+    }
+
+    .metric-grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .metric-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+
+    .metric-box .lbl {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-sub);
+      font-weight: 700;
+    }
+
+    .metric-box .val {
+      font-size: 18px;
+      font-weight: 800;
+      font-family: var(--font-mono);
+      margin-top: 4px;
+      color: #ffffff;
+    }
+
+    .metric-box .sub {
+      font-size: 12.5px;
+      color: var(--text-muted);
+      margin-top: 3px;
+      font-weight: 500;
+    }
+
+    .section-block {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+
+    .section-hdr {
+      font-size: 12.5px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--accent-light);
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .item-breakdown-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    .item-breakdown-table th {
+      text-align: left;
+      padding: 8px 10px;
+      color: var(--text-sub);
+      font-weight: 700;
+      border-bottom: 1px solid var(--border-light);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .item-breakdown-table td {
+      padding: 9px 10px;
+      color: #ffffff;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+
+    .item-breakdown-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    .data-table th, .data-table td {
+      padding: 10px 12px;
+      text-align: left;
+      color: #ffffff;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+
+    .data-table th {
+      color: var(--text-sub);
+      font-weight: 700;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      background: var(--bg-panel);
+    }
+
+    .data-table tr:hover td {
+      background: rgba(14, 165, 233, 0.08);
+    }
+
+    @media (max-width: 980px) {
+      .builder-grid, .tc-layout {
+        grid-template-columns: 1fr;
+      }
+      .metric-grid-4 {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .deals-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-logo">C</div>
+      <div>
+        <div class="brand-title">Carbon</div>
+        <div class="brand-sub">Roblox Limited Market Suite</div>
+      </div>
+    </div>
+
+    <div class="stats-bar">
+      <div class="stat-pill">Limiteds <strong id="st-items">0</strong></div>
+      <div class="stat-pill">Traders <strong id="st-traders">0</strong></div>
+      <div class="stat-pill">Tracked UAIDs <strong id="st-uaids">0</strong></div>
+      <div class="stat-pill">Verified Proofs <strong id="st-proofs">0</strong></div>
+    </div>
+  </header>
+
+  <nav class="nav-tabs">
+    <button class="tab-btn active" onclick="switchTab('tradecheck', this)">Trade Analyser</button>
+    <button class="tab-btn" onclick="switchTab('sniper', this)">Ad Sniper</button>
+    <button class="tab-btn" onclick="switchTab('proofget', this)">Proof Get</button>
+    <button class="tab-btn" onclick="switchTab('oplookup', this)">OP Lookup</button>
+  </nav>
+
+  <main>
+    <section id="tab-tradecheck" class="tab-panel active">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Trade Analyser</div>
+            <div class="card-desc">
+              Step-by-step valuation using Rolimons values, live 7d/30d Roblox sales, UAID proofs, dropping trend penalties, and 30% Robux tax.
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <select id="tc-engine">
+              <option value="v4">Engine V4 Strict (Expert Dynamic)</option>
+              <option value="v3.1">Engine V3.1 (Standard Balanced)</option>
+              <option value="v3">Engine V3 (Demand + Hold Weight)</option>
+              <option value="free">Basic (Raw Value Only)</option>
+            </select>
+            <button class="btn btn-secondary" onclick="swapSides()">Swap Sides</button>
+            <button class="btn btn-secondary" onclick="clearTrade()">Clear</button>
+            <button class="btn" onclick="runTradeCheck()">Analyze Trade</button>
+          </div>
+        </div>
+
+        <div class="builder-grid">
+          <div class="side-box">
+            <div class="side-label">
+              <span>You Give (Max 4 Items)</span>
+              <span class="mono" id="give-sum-lbl" style="color:var(--accent-light);">0 Val | 0 RAP</span>
+            </div>
+            <div class="search-dropdown">
+              <input type="text" id="search-give" placeholder="Search item name, acronym, or ID..." style="width:100%;" oninput="searchSide('give', this.value)" />
+              <div id="results-give" class="search-results"></div>
+            </div>
+            <div id="slots-give" class="slot-list"></div>
+            <div class="robux-bar">
+              <label for="tc-robux-give">Add Robux (30% Tax Applied)</label>
+              <input type="number" id="tc-robux-give" value="0" min="0" step="100" style="width:150px;" oninput="renderBuilderSlots()" />
+            </div>
+          </div>
+
+          <div class="side-box">
+            <div class="side-label">
+              <span>You Receive (Max 4 Items)</span>
+              <span class="mono" id="recv-sum-lbl" style="color:var(--accent-light);">0 Val | 0 RAP</span>
+            </div>
+            <div class="search-dropdown">
+              <input type="text" id="search-recv" placeholder="Search item name, acronym, or ID..." style="width:100%;" oninput="searchSide('recv', this.value)" />
+              <div id="results-recv" class="search-results"></div>
+            </div>
+            <div id="slots-recv" class="slot-list"></div>
+            <div class="robux-bar">
+              <label for="tc-robux-recv">Add Robux (30% Tax Applied)</label>
+              <input type="number" id="tc-robux-recv" value="0" min="0" step="100" style="width:150px;" oninput="renderBuilderSlots()" />
+            </div>
+          </div>
+        </div>
+
+        <div id="tc-output" style="display:none;">
+          <div class="tc-layout">
+            <div id="tc-details"></div>
+            <div>
+              <div class="section-block" style="margin-bottom:0;">
+                <div class="section-hdr">
+                  <span>Rendered Trade Card</span>
+                  <span style="color:var(--text-sub); font-size:11.5px;">Right-click to copy image</span>
+                </div>
+                <img id="tc-card-img" style="width:100%; border-radius:6px; border:1px solid var(--border);" alt="Trade Card" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-sniper" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Rolimons Trade Ad Sniper</div>
+            <div class="card-desc">
+              Filter live Rolimons trade ads by what the poster sends, what the poster wants, value bracket, and deal %.
+            </div>
+          </div>
+          <div class="sniper-controls">
+            <input type="text" id="sniper-sends" placeholder="User Sends (e.g. BPTH)" style="width:175px;" oninput="loadSniper(false)" />
+            <input type="text" id="sniper-wants" placeholder="User Wants (e.g. BPTH)" style="width:175px;" oninput="loadSniper(false)" />
+            <select id="sniper-bucket" onchange="loadSniper(false)">
+              <option value="ALL">All Value Brackets</option>
+              <option value="1k-10k">1k – 10k</option>
+              <option value="10k-50k">10k – 50k</option>
+              <option value="50k-100k">50k – 100k</option>
+              <option value="100k-500k">100k – 500k</option>
+              <option value="500k+">500k+</option>
+            </select>
+            <label style="font-size: 13.5px; color: var(--text-sub); font-weight:600; display:flex; align-items:center; gap:6px;">
+              Min Deal %
+              <input type="number" id="sniper-min" value="5" step="1" style="width:72px;" onchange="loadSniper(false)" />
+            </label>
+            <button class="btn" onclick="loadSniper(true)">Poll Ads Now</button>
+          </div>
+        </div>
+        <div id="sniper-grid" class="deals-grid"></div>
+      </div>
+    </section>
+
+    <section id="tab-proofget" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Proof Get & Sales Verification</div>
+            <div class="card-desc">
+              Inspect verified UAID trade proofs and live Roblox daily sales history for any limited.
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center; width:500px; max-width:100%;">
+            <div class="search-dropdown" style="flex:1;">
+              <input type="text" id="search-proof" placeholder="Search item name, acronym, or ID..." style="width:100%;" oninput="searchSingle('proof', this.value)" />
+              <div id="results-proof" class="search-results"></div>
+            </div>
+            <select id="proof-mode" onchange="if(document.getElementById('search-proof').value) runProofGet(document.getElementById('search-proof').value)">
+              <option value="any">All Modes</option>
+              <option value="upgrade">Upgrades</option>
+              <option value="downgrade">Downgrades</option>
+              <option value="swap">Swaps</option>
+            </select>
+            <button class="btn" onclick="runProofGet(document.getElementById('search-proof').value)">Fetch</button>
+          </div>
+        </div>
+        <div id="proof-output">
+          <div style="color: var(--text-sub); font-size: 14px; padding: 20px 0; text-align:center;">
+            Search and select an item above to view its UAID trade proofs and daily sales history.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-oplookup" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Overpay & Liquidity Lookup</div>
+            <div class="card-desc">
+              Target buy/sell overpay ranges, daily sales velocity, and lowest reseller data.
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center; width:440px; max-width:100%;">
+            <div class="search-dropdown" style="flex:1;">
+              <input type="text" id="search-op" placeholder="Search item name, acronym, or ID..." style="width:100%;" oninput="searchSingle('op', this.value)" />
+              <div id="results-op" class="search-results"></div>
+            </div>
+            <button class="btn" onclick="runOpLookup(document.getElementById('search-op').value)">Lookup</button>
+          </div>
+        </div>
+        <div id="op-output">
+          <div style="color: var(--text-sub); font-size: 14px; padding: 20px 0; text-align:center;">
+            Search and select an item above to inspect its overpay distribution and sales velocity.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      give: [],
+      recv: []
+    };
+
+    const FALLBACK_SVG = "data:image/svg+xml;utf8," + encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><rect width="48" height="48" rx="8" fill="#111927"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#38bdf8" font-family="Segoe UI, sans-serif" font-weight="800" font-size="16">C</text></svg>`
+    );
+
+    function thumbTag(url, small = false) {
+      const src = (url && url.startsWith('http')) ? url : FALLBACK_SVG;
+      const cls = small ? 'item-thumb-sm' : 'item-thumb';
+      return `<img src="${src}" class="${cls}" onerror="this.onerror=null;this.src='${FALLBACK_SVG}'" alt="" />`;
+    }
+
+    function fmt(n) {
+      return Number(n || 0).toLocaleString();
+    }
+
+    function fmtSigned(n) {
+      const v = Number(n || 0);
+      return (v >= 0 ? '+' : '') + v.toLocaleString();
+    }
+
+    function switchTab(tabId, btn) {
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('tab-' + tabId).classList.add('active');
+      btn.classList.add('active');
+      if (tabId === 'sniper') loadSniper(false);
+    }
+
+    async function refreshStatus() {
+      try {
+        const r = await fetch('/api/status');
+        const d = await r.json();
+        const db = d.database || {};
+        document.getElementById('st-items').textContent = fmt(db.items);
+        document.getElementById('st-traders').textContent = fmt(db.traders);
+        document.getElementById('st-uaids').textContent = fmt(db.tracked_uaids);
+        document.getElementById('st-proofs').textContent = fmt(db.proofs);
+      } catch (e) {}
+    }
+
+    async function loadSniper(forcePoll = false) {
+      const grid = document.getElementById('sniper-grid');
+      if (forcePoll) {
+        await fetch('/api/sniper/refresh', { method: 'POST' });
+      }
+      const bucket = encodeURIComponent(document.getElementById('sniper-bucket').value);
+      const minDeal = encodeURIComponent(document.getElementById('sniper-min').value || 0);
+      const sends = encodeURIComponent(document.getElementById('sniper-sends').value || '');
+      const wants = encodeURIComponent(document.getElementById('sniper-wants').value || '');
+
+      try {
+        const r = await fetch(`/api/sniper?bucket=${bucket}&min_deal=${minDeal}&sends=${sends}&wants=${wants}`);
+        const d = await r.json();
+        const deals = d.deals || [];
+        if (!deals.length) {
+          grid.innerHTML = '<div style="color:var(--text-sub); font-size:14px;">No matching trade ads found. Adjust filters or click Poll Ads Now.</div>';
+          return;
+        }
+        grid.innerHTML = deals.map(deal => `
+          <div class="deal-card">
+            <div class="deal-top">
+              <div>
+                <span class="badge badge-win">+${deal.deal_percent}% (${fmtSigned(deal.value_overpay)} Val)</span>
+                <span class="badge badge-info" style="margin-left:4px;">${deal.bucket}</span>
+              </div>
+              <span style="font-size:13.5px; color:var(--text-sub); font-weight:700;">${deal.username}</span>
+            </div>
+            <div class="trade-sides">
+              <div class="side-box">
+                <div class="side-label">
+                  <span>User Sends</span>
+                  <span class="mono">${fmt(deal.offer_value)} V</span>
+                </div>
+                ${deal.offer_items.map(i => `
+                  <div class="item-line">
+                    <div class="item-row-flex">
+                      ${thumbTag(i.thumbnail_url, true)}
+                      <span>${i.name} ${i.acronym ? `<small style="color:var(--accent-light); font-weight:700;">[${i.acronym}]</small>` : ''}</span>
+                    </div>
+                    <span class="mono">${fmt(i.value)}</span>
+                  </div>
+                `).join('')}
+              </div>
+              <div class="side-box">
+                <div class="side-label">
+                  <span>User Wants</span>
+                  <span class="mono">${fmt(deal.request_value)} V</span>
+                </div>
+                ${deal.request_items.map(i => `
+                  <div class="item-line">
+                    <div class="item-row-flex">
+                      ${thumbTag(i.thumbnail_url, true)}
+                      <span>${i.name} ${i.acronym ? `<small style="color:var(--accent-light); font-weight:700;">[${i.acronym}]</small>` : ''}</span>
+                    </div>
+                    <span class="mono">${fmt(i.value)}</span>
+                  </div>
+                `).join('')}
+                ${(deal.request_tags && deal.request_tags.length) ? `<div style="font-size:12.5px; color:var(--accent-light); margin-top:6px; font-weight:600;">Tags: ${deal.request_tags.join(', ')}</div>` : ''}
+              </div>
+            </div>
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <button class="btn btn-secondary" style="padding:6px 12px; font-size:13px;" onclick='loadDealToAnalyser(${JSON.stringify(deal.request_items)}, ${JSON.stringify(deal.offer_items)})'>
+                Load in Analyser
+              </button>
+              <div style="display:flex; gap:6px;">
+                <a href="${deal.links.rolimons_profile}" target="_blank" class="btn btn-secondary" style="text-decoration:none; padding:6px 12px; font-size:13px;">Rolimons</a>
+                <a href="${deal.links.send_trade}" target="_blank" class="btn" style="text-decoration:none; padding:6px 14px; font-size:13px;">Send Trade</a>
+              </div>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {
+        grid.innerHTML = '<div style="color:var(--red);">Failed to load trade ads.</div>';
+      }
+    }
+
+    function loadDealToAnalyser(giveItems, recvItems) {
+      state.give = giveItems.slice(0, 4);
+      state.recv = recvItems.slice(0, 4);
+      document.getElementById('tc-robux-give').value = 0;
+      document.getElementById('tc-robux-recv').value = 0;
+      renderBuilderSlots();
+      document.querySelectorAll('.tab-btn')[0].click();
+      runTradeCheck();
+    }
+
+    let searchTimers = {};
+    async function searchSide(side, q) {
+      clearTimeout(searchTimers[side]);
+      const box = document.getElementById('results-' + side);
+      if (!q || q.trim().length < 1) {
+        box.classList.remove('open');
+        return;
+      }
+      searchTimers[side] = setTimeout(async () => {
+        const r = await fetch(`/api/items/search?q=${encodeURIComponent(q)}&limit=15`);
+        const d = await r.json();
+        const items = d.items || [];
+        if (!items.length) {
+          box.innerHTML = '<div class="search-option">No matching items found</div>';
+        } else {
+          box.innerHTML = items.map(item => `
+            <div class="search-option" onclick='addSlotItem("${side}", ${JSON.stringify(item).replace(/'/g, "&apos;")})'>
+              <div class="item-row-flex">
+                ${thumbTag(item.thumbnail_url, true)}
+                <div>
+                  <strong>${item.name}</strong>
+                  ${item.acronym ? `<span style="color:var(--accent-light); margin-left:6px; font-size:12.5px; font-weight:700;">[${item.acronym}]</span>` : ''}
+                  ${item.rare ? `<span class="badge badge-info" style="margin-left:6px; font-size:10.5px; padding:2px 6px;">RARE</span>` : ''}
+                  ${item.is_valued ? `<span class="badge badge-info" style="margin-left:6px; font-size:10.5px; padding:2px 6px;">VALUED</span>` : `<span style="color:var(--text-muted); margin-left:6px; font-size:11.5px;">RAP</span>`}
+                </div>
+              </div>
+              <div class="mono" style="font-size:13px; color:var(--text-sub);">
+                V: ${fmt(item.value)} | R: ${fmt(item.rap)}
+              </div>
+            </div>
+          `).join('');
+        }
+        box.classList.add('open');
+      }, 120);
+    }
+
+    function addSlotItem(side, item) {
+      if (state[side].length >= 4) return;
+      state[side].push(item);
+      document.getElementById('results-' + side).classList.remove('open');
+      document.getElementById('search-' + side).value = '';
+      renderBuilderSlots();
+    }
+
+    function removeSlotItem(side, idx) {
+      state[side].splice(idx, 1);
+      renderBuilderSlots();
+    }
+
+    function swapSides() {
+      const tmp = state.give;
+      state.give = state.recv;
+      state.recv = tmp;
+      const rg = document.getElementById('tc-robux-give').value;
+      const rr = document.getElementById('tc-robux-recv').value;
+      document.getElementById('tc-robux-give').value = rr;
+      document.getElementById('tc-robux-recv').value = rg;
+      renderBuilderSlots();
+    }
+
+    function clearTrade() {
+      state.give = [];
+      state.recv = [];
+      document.getElementById('tc-robux-give').value = 0;
+      document.getElementById('tc-robux-recv').value = 0;
+      renderBuilderSlots();
+      document.getElementById('tc-output').style.display = 'none';
+    }
+
+    function renderBuilderSlots() {
+      ['give', 'recv'].forEach(side => {
+        const container = document.getElementById('slots-' + side);
+        const robuxRaw = parseInt(document.getElementById('tc-robux-' + side).value || '0', 10) || 0;
+        const robuxNet = Math.round(robuxRaw * 0.70);
+        const sumVal = state[side].reduce((acc, x) => acc + (x.value || 0), 0) + robuxNet;
+        const sumRap = state[side].reduce((acc, x) => acc + (x.rap || 0), 0) + robuxNet;
+        document.getElementById(side + '-sum-lbl').textContent = `${fmt(sumVal)} Val | ${fmt(sumRap)} RAP`;
+
+        if (!state[side].length) {
+          container.innerHTML = '<div style="color:var(--text-muted); font-size:13.5px; padding:16px 4px;">No items selected. Search above to add up to 4 limiteds.</div>';
+          return;
+        }
+        container.innerHTML = state[side].map((item, idx) => `
+          <div class="slot-item">
+            <div class="item-row-flex">
+              ${thumbTag(item.thumbnail_url, false)}
+              <div>
+                <div style="font-weight:700; font-size:14.5px; color:#ffffff;">
+                  ${item.name}
+                  ${item.acronym ? `<span style="color:var(--accent-light);">[${item.acronym}]</span>` : ''}
+                  ${item.rare ? `<span class="badge badge-info" style="margin-left:6px; font-size:10.5px; padding:2px 6px;">RARE</span>` : ''}
+                  ${item.is_valued ? `<span class="badge badge-info" style="margin-left:6px; font-size:10.5px; padding:2px 6px;">VALUED</span>` : `<span style="color:var(--text-muted); font-size:11.5px; margin-left:6px;">RAP</span>`}
+                </div>
+                <div class="mono" style="font-size:13px; color:var(--text-sub); margin-top:3px;">
+                  Value: ${fmt(item.value)} | RAP: ${fmt(item.rap)} | Demand: ${item.demand_label || 'Unassigned'}
+                </div>
+              </div>
+            </div>
+            <button class="btn btn-secondary" style="padding:5px 11px; font-size:12.5px;" onclick="removeSlotItem('${side}', ${idx})">Remove</button>
+          </div>
+        `).join('');
+      });
+    }
+
+    async function runTradeCheck() {
+      const giveRobux = parseInt(document.getElementById('tc-robux-give').value || '0', 10) || 0;
+      const recvRobux = parseInt(document.getElementById('tc-robux-recv').value || '0', 10) || 0;
+      const engine = document.getElementById('tc-engine').value;
+
+      if ((!state.give.length && giveRobux <= 0) || (!state.recv.length && recvRobux <= 0)) {
+        alert('Add at least one item or Robux to both sides.');
+        return;
+      }
+
+      const r = await fetch('/api/tradecheck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          give: state.give.map(x => x.item_id),
+          receive: state.recv.map(x => x.item_id),
+          give_robux: giveRobux,
+          receive_robux: recvRobux,
+          engine: engine
+        })
+      });
+      if (!r.ok) {
+        const err = await r.json();
+        alert(err.detail || 'Error running Trade Analyser');
+        return;
+      }
+      const d = await r.json();
+      state.give = d.give_items;
+      state.recv = d.receive_items;
+      renderBuilderSlots();
+
+      document.getElementById('tc-output').style.display = 'block';
+      document.getElementById('tc-card-img').src = d.card_png_base64;
+
+      const badgeCls = d.color === 'green' ? 'badge-win' : (d.color === 'yellow' ? 'badge-fair' : 'badge-loss');
+
+      const buildItemRows = (items, rRaw, rNet) => `
+        <table class="item-breakdown-table">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Status</th>
+              <th>Base Val</th>
+              <th>Real Market Val</th>
+              <th>RAP / 7d Sale</th>
+              <th>Demand / Trend</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map(i => {
+              const mkt = i.market_value !== undefined ? i.market_value : i.value;
+              const adj = i.effective_op !== undefined ? i.effective_op : 0;
+              return `
+              <tr>
+                <td>
+                  <div class="item-row-flex">
+                    ${thumbTag(i.thumbnail_url, false)}
+                    <div>
+                      <strong>${i.name}</strong> ${i.acronym ? `<span style="color:var(--accent-light); font-weight:700;">[${i.acronym}]</span>` : ''}
+                      ${i.projected ? `<span class="badge badge-loss" style="font-size:10.5px; margin-left:4px;">PROJ</span>` : ''}
+                      ${i.rare ? `<span class="badge badge-info" style="font-size:10.5px; margin-left:4px;">RARE</span>` : ''}
+                      ${i.eval_reason ? `<div style="font-size:12px; color:var(--text-sub); margin-top:2px;">${i.eval_reason}</div>` : ''}
+                    </div>
+                  </div>
+                </td>
+                <td>${i.is_valued ? `<span style="color:var(--accent-light); font-weight:700;">Valued</span>` : `<span style="color:var(--text-sub);">Unvalued RAP</span>`}</td>
+                <td class="mono">${fmt(i.value)}</td>
+                <td class="mono" style="font-weight:700; color:${adj >= 0 ? '#4ade80' : '#fb7185'}">${fmt(mkt)} <small>(${fmtSigned(adj)})</small></td>
+                <td class="mono">${fmt(i.rap)} ${i.avg_price_7d ? `<div style="font-size:11.5px; color:var(--text-sub);">7d: ${fmt(i.avg_price_7d)}</div>` : ''}</td>
+                <td>${i.demand_label || 'Unassigned'} / ${i.trend_label || 'Unassigned'}</td>
+              </tr>
+            `}).join('')}
+            ${rRaw > 0 ? `
+              <tr>
+                <td><strong>Robux Added</strong></td>
+                <td><span style="color:var(--green); font-weight:700;">After 30% Tax</span></td>
+                <td class="mono">+${fmt(rNet)}</td>
+                <td class="mono">+${fmt(rNet)}</td>
+                <td class="mono">Raw: ${fmt(rRaw)} R$</td>
+                <td>Currency</td>
+              </tr>
+            ` : ''}
+          </tbody>
+        </table>
+      `;
+
+      const ledgerHtml = (d.ledger && d.ledger.length) ? `
+        <div class="section-block" style="margin-bottom:0;">
+          <div class="section-hdr">
+            <span>Step-by-Step Math Ledger (Why It Is a ${d.verdict})</span>
+            <span class="mono" style="font-size:11.5px; color:var(--text-sub);">${d.disclaimer || ''}</span>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Step</th>
+                <th>You Give</th>
+                <th>You Receive</th>
+                <th>Impact on Your Edge</th>
+                <th>Why / Rule Applied</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${d.ledger.map(row => `
+                <tr>
+                  <td><strong>${row.step}</strong></td>
+                  <td class="mono">${row.give}</td>
+                  <td class="mono">${row.receive}</td>
+                  <td class="mono" style="font-weight:700; color:${String(row.delta).startsWith('-') ? '#fb7185' : '#4ade80'};">${row.delta}</td>
+                  <td style="color:var(--text-sub); font-size:13px;">${row.reason}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      ` : '';
+
+      document.getElementById('tc-details').innerHTML = `
+        <div class="section-block" style="display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <div style="font-size:12px; color:var(--text-sub); text-transform:uppercase; font-weight:800;">Verdict (${d.engine})</div>
+            <div style="font-size:22px; font-weight:900; margin-top:2px; color:#ffffff;">${d.verdict}</div>
+          </div>
+          <span class="badge ${badgeCls}" style="font-size:14.5px; padding:7px 14px;">
+            Real Market Edge: ${fmtSigned(d.retrade_room)}
+          </span>
+        </div>
+
+        <div class="metric-grid-4">
+          <div class="metric-box">
+            <div class="lbl">You Give (Rolimons)</div>
+            <div class="val">${fmt(d.give_value)}</div>
+            <div class="sub">RAP: ${fmt(d.give_rap)}</div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">You Receive (Rolimons)</div>
+            <div class="val">${fmt(d.receive_value)}</div>
+            <div class="sub">RAP: ${fmt(d.receive_rap)}</div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">Raw Value Diff</div>
+            <div class="val" style="color:${d.op_value >= 0 ? '#4ade80' : '#fb7185'}">${fmtSigned(d.op_value)}</div>
+            <div class="sub">RAP Diff: ${fmtSigned(d.op_rap)}</div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">Real Market Edge</div>
+            <div class="val" style="color:${d.retrade_room >= 0 ? 'var(--accent-light)' : '#fb7185'}">${fmtSigned(d.retrade_room)}</div>
+            <div class="sub">Sales, Proofs & Structure</div>
+          </div>
+        </div>
+
+        <div class="section-block">
+          <div class="section-hdr"><span>You Give Breakdown</span></div>
+          ${buildItemRows(d.give_items, d.give_robux, d.give_robux_net)}
+        </div>
+
+        <div class="section-block">
+          <div class="section-hdr"><span>You Receive Breakdown</span></div>
+          ${buildItemRows(d.receive_items, d.receive_robux, d.receive_robux_net)}
+        </div>
+
+        ${ledgerHtml}
+      `;
+    }
+
+    async function searchSingle(mode, q) {
+      const box = document.getElementById('results-' + mode);
+      if (!q || q.trim().length < 1) {
+        box.classList.remove('open');
+        return;
+      }
+      const r = await fetch(`/api/items/search?q=${encodeURIComponent(q)}&limit=12`);
+      const d = await r.json();
+      box.innerHTML = (d.items || []).map(item => `
+        <div class="search-option" onclick="selectSingle('${mode}', '${item.item_id}', '${item.name.replace(/'/g, "\\'")}')">
+          <div class="item-row-flex">
+            ${thumbTag(item.thumbnail_url, true)}
+            <div>
+              <strong>${item.name}</strong>
+              ${item.acronym ? `<span style="color:var(--accent-light); margin-left:6px; font-weight:700;">[${item.acronym}]</span>` : ''}
+              ${item.rare ? `<span class="badge badge-info" style="margin-left:6px; font-size:10.5px;">RARE</span>` : ''}
+            </div>
+          </div>
+          <div class="mono" style="font-size:13px; color:var(--text-sub);">Val: ${fmt(item.value)} | RAP: ${fmt(item.rap)}</div>
+        </div>
+      `).join('');
+      box.classList.add('open');
+    }
+
+    function selectSingle(mode, itemId, itemName) {
+      document.getElementById('results-' + mode).classList.remove('open');
+      document.getElementById('search-' + mode).value = itemName;
+      if (mode === 'proof') runProofGet(itemId);
+      if (mode === 'op') runOpLookup(itemId);
+    }
+
+    async function runProofGet(query) {
+      if (!query) return;
+      const mode = document.getElementById('proof-mode').value;
+      const out = document.getElementById('proof-output');
+      out.innerHTML = '<div style="color:var(--text-sub); font-size:14px;">Loading proofs and Roblox sales data...</div>';
+      const r = await fetch(`/api/proofget?item=${encodeURIComponent(query)}&mode=${mode}`);
+      if (!r.ok) {
+        out.innerHTML = '<div style="color:var(--red);">Item not found.</div>';
+        return;
+      }
+      const d = await r.json();
+      const it = d.item;
+      const s = d.sales || {};
+      const pts = s.recent_points || [];
+
+      out.innerHTML = `
+        <div class="metric-grid-4">
+          <div class="metric-box">
+            <div class="item-row-flex">
+              ${thumbTag(it.thumbnail_url, false)}
+              <div>
+                <div class="lbl">${it.name}</div>
+                <div class="val">${fmt(it.value)} Val</div>
+                <div class="sub">RAP: ${fmt(it.rap)} | ${it.rare ? 'Rare Limited' : (it.is_valued ? 'Valued' : 'RAP Item')}</div>
+              </div>
+            </div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">7d / 30d Avg Sale</div>
+            <div class="val">${fmt(s.avg_price_7d || it.rap)} R$</div>
+            <div class="sub">30d Avg: ${fmt(s.avg_price_30d || it.rap)} R$</div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">Daily Sales Velocity</div>
+            <div class="val" style="color:var(--accent-light);">${s.daily_volume || 0} / day</div>
+            <div class="sub">Lowest Reseller: ${s.lowest_resale ? fmt(s.lowest_resale) + ' R$' : 'N/A'}</div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">Local UAID Proofs</div>
+            <div class="val">${d.count}</div>
+            <div class="sub">Demand: ${it.demand_label || 'Unassigned'}</div>
+          </div>
+        </div>
+
+        <div class="section-block">
+          <div class="section-hdr"><span>Verified UAID Trade Proofs (${d.count})</span></div>
+          ${!d.proofs.length ? `<div style="color:var(--text-sub); font-size:14px;">0 UAID trade proofs logged for this item yet. Live sales history is shown below.</div>` : `
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Age</th>
+                  <th>Traders</th>
+                  <th>Side A</th>
+                  <th>Side B</th>
+                  <th>Overpay</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${d.proofs.map(p => `
+                  <tr>
+                    <td class="mono" style="color:var(--text-sub);">${p.age}</td>
+                    <td>${p.user_a_name} ⇄ ${p.user_b_name}</td>
+                    <td>
+                      ${p.items_a.map(x => `<div class="item-row-flex" style="margin-bottom:4px;">${thumbTag(x.thumbnail_url, true)} <span>${x.name} <span class="mono" style="color:var(--text-sub);">(${fmt(x.value)})</span></span></div>`).join('')}
+                      <div class="mono" style="font-size:12.5px; color:var(--accent-light); font-weight:700;">Total: ${fmt(p.value_a)}</div>
+                    </td>
+                    <td>
+                      ${p.items_b.map(x => `<div class="item-row-flex" style="margin-bottom:4px;">${thumbTag(x.thumbnail_url, true)} <span>${x.name} <span class="mono" style="color:var(--text-sub);">(${fmt(x.value)})</span></span></div>`).join('')}
+                      <div class="mono" style="font-size:12.5px; color:var(--accent-light); font-weight:700;">Total: ${fmt(p.value_b)}</div>
+                    </td>
+                    <td><span class="badge badge-info">${p.op_label} (${p.trade_type})</span></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          `}
+        </div>
+
+        ${pts.length ? `
+        <div class="section-block" style="margin-bottom:0;">
+          <div class="section-hdr"><span>Recent Daily Roblox Sales History</span></div>
+          <table class="data-table">
+            <thead>
+              <tr><th>Date</th><th>Average Sale Price</th><th>Daily Volume</th><th>Vs Rolimons Value</th></tr>
+            </thead>
+            <tbody>
+              ${pts.slice(0, 14).map(pt => {
+                const diff = (pt.price || 0) - it.value;
+                return `
+                <tr>
+                  <td class="mono">${pt.date}</td>
+                  <td class="mono">${fmt(pt.price)} R$</td>
+                  <td class="mono">${pt.volume} sold</td>
+                  <td><span class="badge ${diff >= 0 ? 'badge-win' : 'badge-loss'}">${fmtSigned(diff)}</span></td>
+                </tr>
+              `}).join('')}
+            </tbody>
+          </table>
+        </div>
+        ` : ''}
+      `;
+    }
+
+    async function runOpLookup(query) {
+      if (!query) return;
+      const out = document.getElementById('op-output');
+      out.innerHTML = '<div style="color:var(--text-sub); font-size:14px;">Calculating overpay & sales distribution...</div>';
+      const r = await fetch(`/api/oplookup?item=${encodeURIComponent(query)}`);
+      if (!r.ok) {
+        out.innerHTML = '<div style="color:var(--red);">Item not found.</div>';
+        return;
+      }
+      const d = await r.json();
+      const it = d.item;
+      const s = d.sales_summary || {};
+      const pts = s.recent_points || [];
+
+      out.innerHTML = `
+        <div class="metric-grid-4">
+          <div class="metric-box">
+            <div class="item-row-flex">
+              ${thumbTag(it.thumbnail_url, false)}
+              <div>
+                <div class="lbl">${it.name}</div>
+                <div class="val">${fmt(it.value)} Val</div>
+                <div class="sub">RAP: ${fmt(it.rap)} | ${it.rare ? 'Rare' : ''} ${it.demand_label || 'Unassigned'} Demand</div>
+              </div>
+            </div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">Median Overpay</div>
+            <div class="val" style="color:var(--accent-light);">${d.avg_op !== null ? fmtSigned(d.avg_op) : 'N/A'}</div>
+            <div class="sub">Range: ${d.op_range ? `${fmtSigned(d.op_range[0])} to ${fmtSigned(d.op_range[1])}` : 'N/A'}</div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">Target Buy / Sell Total</div>
+            <div class="val">${d.max_total_to_give ? fmt(d.max_total_to_give) : 'N/A'} / ${d.min_total_to_expect ? fmt(d.min_total_to_expect) : 'N/A'}</div>
+            <div class="sub">Buy Max OP: ${d.max_op_to_give !== null ? fmtSigned(d.max_op_to_give) : 'N/A'} | Sell Min: ${d.min_op_to_expect !== null ? fmtSigned(d.min_op_to_expect) : 'N/A'}</div>
+          </div>
+          <div class="metric-box">
+            <div class="lbl">Sales & Confidence</div>
+            <div class="val">${d.daily_sales_volume || 0}/day</div>
+            <div class="sub">${d.confidence} (${d.proof_count} proofs, ${d.ad_quote_count} ads)</div>
+          </div>
+        </div>
+
+        <div class="section-block">
+          <div class="section-hdr">
+            <span>Market Summary</span>
+            <span class="mono">${d.confidence_detail}</span>
+          </div>
+          <div style="font-size:14.5px; color:#ffffff; line-height:1.6;">${d.explanation}</div>
+        </div>
+
+        ${pts.length ? `
+        <div class="section-block" style="margin-bottom:0;">
+          <div class="section-hdr"><span>Recent Daily Sales Points (7d Avg: ${fmt(s.avg_price_7d)} R$ | Lowest Reseller: ${fmt(s.lowest_resale)} R$)</span></div>
+          <table class="data-table">
+            <thead>
+              <tr><th>Date</th><th>Average Sale Price</th><th>Daily Volume</th><th>Vs Base Value</th></tr>
+            </thead>
+            <tbody>
+              ${pts.slice(0, 12).map(pt => {
+                const diff = (pt.price || 0) - it.value;
+                return `
+                <tr>
+                  <td class="mono">${pt.date}</td>
+                  <td class="mono">${fmt(pt.price)} R$</td>
+                  <td class="mono">${pt.volume} sold</td>
+                  <td><span class="badge ${diff >= 0 ? 'badge-win' : 'badge-loss'}">${fmtSigned(diff)}</span></td>
+                </tr>
+              `}).join('')}
+            </tbody>
+          </table>
+        </div>
+        ` : ''}
+      `;
+    }
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.search-dropdown')) {
+        document.querySelectorAll('.search-results').forEach(el => el.classList.remove('open'));
+      }
+    });
+
+    renderBuilderSlots();
+    refreshStatus();
+    setInterval(refreshStatus, 8000);
+  </script>
+</body>
+</html>
