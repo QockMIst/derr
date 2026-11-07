@@ -1,7 +1,9 @@
+import asyncio
 import json
 import os
 import sqlite3
 import subprocess
+import threading
 import time
 import tomllib
 import urllib.error
@@ -303,98 +305,189 @@ def match_pending(conn: sqlite3.Connection, items_catalog: Dict[int, Dict[str, A
     return trades_created
 
 
+def push_db_checkpoint() -> None:
+    try:
+        subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=False)
+        subprocess.run(
+            ["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"],
+            check=False,
+        )
+        subprocess.run(["git", "add", "void_data.sqlite3"], check=False)
+        res = subprocess.run(["git", "commit", "-m", "Auto-update trade DB"], capture_output=True)
+        if res.returncode == 0:
+            subprocess.run(["git", "pull", "--rebase", "-X", "ours"], check=False)
+            subprocess.run(["git", "push"], check=False)
+    except Exception:
+        pass
+
+
+def trigger_next_github_workflow() -> None:
+    gh_tok = os.environ.get("GITHUB_TOKEN", "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY", "QockMlst/derr").strip()
+    wf_name = os.environ.get("GITHUB_WORKFLOW_FILE", "scanner.yml").strip()
+    if not gh_tok or not repo:
+        return
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{wf_name}/dispatches"
+    body = json.dumps({"ref": "main"}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {gh_tok}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "CarbonScanner",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except Exception:
+        pass
+
+
+def start_discord_bot_background(bot_token: str) -> None:
+    if not bot_token:
+        return
+
+    def _runner():
+        try:
+            from bot import client as discord_client
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(discord_client.start(bot_token))
+        except Exception as exc:
+            print(f"[Carbon Cloud Bot] Error: {exc}")
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+
+
 def main() -> None:
     conn = connect_db()
     start_ts = time.time()
     now = int(start_ts)
+    max_run_seconds = int(os.environ.get("MAX_RUN_SECONDS", "19800"))
 
-    roli = get_json("https://api.rolimons.com/items/v2/itemdetails")
-    items_catalog: Dict[int, Dict[str, Any]] = {}
-    if roli and roli.get("success"):
-        rows = []
-        for iid_str, info in (roli.get("items") or {}).items():
-            iid = int(iid_str)
-            rap = int(info[2]) if info[2] is not None and info[2] >= 0 else 0
-            raw_val = int(info[3]) if info[3] is not None else -1
-            def_val = int(info[4]) if info[4] is not None and info[4] >= 0 else rap
-            val = raw_val if raw_val >= 0 else def_val
-            items_catalog[iid] = {
-                "item_id": iid,
-                "name": str(info[0]),
-                "acronym": str(info[1] or ""),
-                "rap": rap,
-                "value": val,
-            }
-            rows.append(
-                (
-                    iid,
-                    str(info[0]),
-                    str(info[1] or ""),
-                    rap,
-                    val,
-                    def_val,
-                    int(info[5]) if info[5] is not None else -1,
-                    int(info[6]) if info[6] is not None else -1,
-                    1 if info[7] == 1 else 0,
-                    1 if info[8] == 1 else 0,
-                    1 if info[9] == 1 else 0,
-                    "rolimons",
-                    now,
-                )
-            )
-        with conn:
-            conn.executemany(
-                """
-                INSERT INTO items (
-                    item_id, name, acronym, rap, value, default_value,
-                    demand, trend, projected, hyped, rare, source, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(item_id) DO UPDATE SET
-                    name=excluded.name, acronym=excluded.acronym, rap=excluded.rap,
-                    value=excluded.value, default_value=excluded.default_value,
-                    demand=excluded.demand, trend=excluded.trend,
-                    projected=excluded.projected, hyped=excluded.hyped, rare=excluded.rare,
-                    updated_at=excluded.updated_at
-                """,
-                rows,
-            )
-
-    seed_ads(conn)
-
-    vr_imported = 0
-    try:
-        from db import Database
-        from value_requests import poll_discord_value_requests_channel
-
-        cfg = {}
-        if CONFIG_PATH.exists():
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
             with open(CONFIG_PATH, "rb") as f:
                 cfg = tomllib.load(f)
-        disc_cfg = cfg.get("discord", {})
-        vr_chan = os.environ.get("VALUE_REQUESTS_CHANNEL_ID") or str(
-            disc_cfg.get("value_requests_channel_id", "535250426061258753")
-        ).strip()
-        vr_tok = os.environ.get("DISCORD_SCANNER_TOKEN") or str(
-            disc_cfg.get("scanner_token", "")
-        ).strip()
-        if vr_chan and vr_tok:
-            db_obj = Database(DB_PATH)
-            vr_imported = poll_discord_value_requests_channel(
-                db_obj, items_catalog, vr_chan, vr_tok, set()
-            )
-    except Exception:
-        pass
+        except Exception:
+            cfg = {}
+    disc_cfg = cfg.get("discord", {})
+
+    bot_token = os.environ.get("DISCORD_BOT_TOKEN", "").strip() or str(
+        disc_cfg.get("bot_token", "")
+    ).strip()
+    vr_chan = os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip() or str(
+        disc_cfg.get("value_requests_channel_id", "535250426061258753")
+    ).strip()
+    vr_tok = os.environ.get("DISCORD_SCANNER_TOKEN", "").strip() or str(
+        disc_cfg.get("scanner_token", "")
+    ).strip()
+
+    if bot_token:
+        start_discord_bot_background(bot_token)
+
+    def refresh_roli_items() -> Dict[int, Dict[str, Any]]:
+        roli = get_json("https://api.rolimons.com/items/v2/itemdetails")
+        cat: Dict[int, Dict[str, Any]] = {}
+        if roli and roli.get("success"):
+            rows = []
+            ts_now = int(time.time())
+            for iid_str, info in (roli.get("items") or {}).items():
+                iid = int(iid_str)
+                rap = int(info[2]) if info[2] is not None and info[2] >= 0 else 0
+                raw_val = int(info[3]) if info[3] is not None else -1
+                def_val = int(info[4]) if info[4] is not None and info[4] >= 0 else rap
+                val = raw_val if raw_val >= 0 else def_val
+                cat[iid] = {
+                    "item_id": iid,
+                    "name": str(info[0]),
+                    "acronym": str(info[1] or ""),
+                    "rap": rap,
+                    "value": val,
+                }
+                rows.append(
+                    (
+                        iid,
+                        str(info[0]),
+                        str(info[1] or ""),
+                        rap,
+                        val,
+                        def_val,
+                        int(info[5]) if info[5] is not None else -1,
+                        int(info[6]) if info[6] is not None else -1,
+                        1 if info[7] == 1 else 0,
+                        1 if info[8] == 1 else 0,
+                        1 if info[9] == 1 else 0,
+                        "rolimons",
+                        ts_now,
+                    )
+                )
+            with conn:
+                conn.executemany(
+                    """
+                    INSERT INTO items (
+                        item_id, name, acronym, rap, value, default_value,
+                        demand, trend, projected, hyped, rare, source, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(item_id) DO UPDATE SET
+                        name=excluded.name, acronym=excluded.acronym, rap=excluded.rap,
+                        value=excluded.value, default_value=excluded.default_value,
+                        demand=excluded.demand, trend=excluded.trend,
+                        projected=excluded.projected, hyped=excluded.hyped, rare=excluded.rare,
+                        updated_at=excluded.updated_at
+                    """,
+                    rows,
+                )
+        return cat
+
+    items_catalog = refresh_roli_items()
+    seed_ads(conn)
 
     moves_count = 0
     trades_created = 0
     scanned = 0
     priority_users: List[int] = []
+    seen_vr_msgs: set[str] = set()
     last_ad_seed = time.time()
+    last_vr_poll = 0.0
+    last_roli_refresh = time.time()
+    last_git_push = time.time()
 
-    while (time.time() - start_ts) < 260 and scanned < 420:
-        if time.time() - last_ad_seed >= 25:
+    while (time.time() - start_ts) < max_run_seconds:
+        now_f = time.time()
+
+        if now_f - last_roli_refresh >= 300:
+            fresh_cat = refresh_roli_items()
+            if fresh_cat:
+                items_catalog = fresh_cat
+            last_roli_refresh = now_f
+
+        if now_f - last_ad_seed >= 25:
             seed_ads(conn)
-            last_ad_seed = time.time()
+            last_ad_seed = now_f
+
+        if vr_chan and vr_tok and (now_f - last_vr_poll >= 25):
+            last_vr_poll = now_f
+            try:
+                from db import Database
+                from value_requests import poll_discord_value_requests_channel
+
+                db_obj = Database(DB_PATH)
+                trades_created += poll_discord_value_requests_channel(
+                    db_obj, items_catalog, vr_chan, vr_tok, seen_vr_msgs
+                )
+            except Exception:
+                pass
+
+        if now_f - last_git_push >= 600:
+            last_git_push = now_f
+            push_db_checkpoint()
 
         if priority_users:
             uid = priority_users.pop(0)
@@ -412,7 +505,8 @@ def main() -> None:
                 (step_now - 3600, step_now - 45),
             ).fetchone()
             if not row:
-                break
+                time.sleep(2.0)
+                continue
             uid = int(row["user_id"])
 
         scanned += 1
@@ -507,6 +601,8 @@ def main() -> None:
     total_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     total_owners = conn.execute("SELECT COUNT(*) FROM owners").fetchone()[0]
     conn.close()
+    push_db_checkpoint()
+    trigger_next_github_workflow()
     print(
         f"Batch complete: scanned={scanned}, moves={moves_count}, new_trades={trades_created}, total_trades={total_trades}, tracked_uaids={total_owners}"
     )

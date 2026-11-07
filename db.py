@@ -614,12 +614,24 @@ class Database:
             )
             trade_id = cur.lastrowid
 
+            sum_val_a = sum(int(x.get("value", 0)) for x in items_a)
+            sum_val_b = sum(int(x.get("value", 0)) for x in items_b)
+            eff_side_a = max(value_a, sum_val_a)
+            eff_side_b = max(value_b, sum_val_b)
+            if abs(sum_val_a - value_b) + abs(sum_val_b - value_a) + 5000 < abs(sum_val_a - value_a) + abs(sum_val_b - value_b):
+                eff_side_a = sum_val_a
+                eff_side_b = sum_val_b
+
             for idx, it in enumerate(items_a):
                 iid_a = int(it.get("item_id", 0))
                 if iid_a <= 0:
                     continue
-                share = (it["value"] / value_a) if value_a > 0 else (1.0 / len(items_a))
-                realized_op = int(round((value_b - value_a) * share))
+                it_val = int(it.get("value", 0))
+                if len(items_a) == 1:
+                    realized_op = int(eff_side_b - it_val)
+                else:
+                    share = (it_val / sum_val_a) if sum_val_a > 0 else (1.0 / len(items_a))
+                    realized_op = int(round((eff_side_b - sum_val_a) * share))
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO trade_items (
@@ -631,10 +643,10 @@ class Database:
                         trade_id,
                         iid_a,
                         it.get("uaid", idx),
-                        it["value"],
+                        it_val,
                         it["rap"],
-                        value_b,
-                        value_a,
+                        eff_side_b,
+                        sum_val_a,
                         realized_op,
                         now,
                     ),
@@ -644,8 +656,12 @@ class Database:
                 iid_b = int(it.get("item_id", 0))
                 if iid_b <= 0:
                     continue
-                share = (it["value"] / value_b) if value_b > 0 else (1.0 / len(items_b))
-                realized_op = int(round((value_a - value_b) * share))
+                it_val = int(it.get("value", 0))
+                if len(items_b) == 1:
+                    realized_op = int(eff_side_a - it_val)
+                else:
+                    share = (it_val / sum_val_b) if sum_val_b > 0 else (1.0 / len(items_b))
+                    realized_op = int(round((eff_side_a - sum_val_b) * share))
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO trade_items (
@@ -657,10 +673,10 @@ class Database:
                         trade_id,
                         iid_b,
                         it.get("uaid", idx),
-                        it["value"],
+                        it_val,
                         it["rap"],
-                        value_a,
-                        value_b,
+                        eff_side_a,
+                        sum_val_b,
                         realized_op,
                         now,
                     ),

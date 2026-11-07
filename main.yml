@@ -25,7 +25,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr
-          pip install discord.py pillow pytesseract fastapi uvicorn pydantic
+          pip install discord.py pillow pytesseract rapidocr_onnxruntime fastapi uvicorn pydantic
 
       - name: Run 24/7 Discord Bot + Value Requests Scanner + Fast UAID Scanner
         env:
@@ -64,18 +64,44 @@ jobs:
           conn.execute("DELETE FROM trades WHERE items_a_json = items_b_json OR items_a_json LIKE '%\"item_id\": 0%' OR items_b_json LIKE '%\"item_id\": 0%'")
           conn.commit()
 
-          if Path("bot.py").exists():
-              bot_tok = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
-              if bot_tok:
-                  def _run_bot():
+          import sys, tomllib
+          bot_started = False
+          for cand in [Path("."), Path("void_tool")] + [p.parent for p in Path(".").rglob("bot.py")]:
+              if (cand / "bot.py").exists() and not bot_started:
+                  bot_started = True
+                  sys.path.insert(0, str(cand.resolve()))
+                  cfg_bot_tok = ""
+                  cfg_scan_tok = ""
+                  cfg_chan_id = ""
+                  cfg_p = cand / "config.toml"
+                  if cfg_p.exists():
                       try:
-                          from bot import client as discord_client
-                          loop = asyncio.new_event_loop()
-                          asyncio.set_event_loop(loop)
-                          loop.run_until_complete(discord_client.start(bot_tok))
-                      except Exception as e:
-                          print("[Bot Error]", e, flush=True)
-                  threading.Thread(target=_run_bot, daemon=True).start()
+                          with open(cfg_p, "rb") as cf:
+                              d_cfg = tomllib.load(cf).get("discord", {})
+                              cfg_bot_tok = str(d_cfg.get("bot_token", "")).strip()
+                              cfg_scan_tok = str(d_cfg.get("scanner_token", "")).strip()
+                              cfg_chan_id = str(d_cfg.get("value_requests_channel_id", "")).strip()
+                      except Exception:
+                          pass
+                  bot_tok = os.environ.get("DISCORD_BOT_TOKEN", "").strip() or cfg_bot_tok or "MTU2ODQyNzIxODUxMjY1MDQ0MQ.G71zcY.jETPRdIc2VU5ODwkGxXHuFbAynuTyAVeXsAGfw"
+                  if not os.environ.get("DISCORD_SCANNER_TOKEN", "").strip():
+                      os.environ["DISCORD_SCANNER_TOKEN"] = cfg_scan_tok or "MTEwNTg1MDM0ODA2NjgzNjU3Mg.Gf8vXb.QDrvuh1MhjSM793anCEmPiLLDT50RoeEOkpg1Q"
+                  if not os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip():
+                      os.environ["VALUE_REQUESTS_CHANNEL_ID"] = cfg_chan_id or "535250426061258753"
+                  if bot_tok:
+                      def _run_bot():
+                          try:
+                              from bot import client as discord_client
+                              loop = asyncio.new_event_loop()
+                              asyncio.set_event_loop(loop)
+                              loop.run_until_complete(discord_client.start(bot_tok))
+                          except Exception as e:
+                              print("[Bot Error]", e, flush=True)
+                      threading.Thread(target=_run_bot, daemon=True).start()
+                  break
+          if not bot_started:
+              os.environ["DISCORD_SCANNER_TOKEN"] = os.environ.get("DISCORD_SCANNER_TOKEN", "").strip() or "MTEwNTg1MDM0ODA2NjgzNjU3Mg.Gf8vXb.QDrvuh1MhjSM793anCEmPiLLDT50RoeEOkpg1Q"
+              os.environ["VALUE_REQUESTS_CHANNEL_ID"] = os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip() or "535250426061258753"
 
           def git_checkpoint():
               try:
@@ -103,6 +129,10 @@ jobs:
                       conn.execute("INSERT OR REPLACE INTO items (item_id,name,acronym,rap,value,default_value,demand,trend,projected,hyped,rare,source,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'rolimons',?)",
                           (iid, str(inf[0]), str(inf[1] or ""), rap, val, rap, int(inf[5] if inf[5] is not None else -1), int(inf[6] if inf[6] is not None else -1), 1 if inf[7]==1 else 0, 1 if inf[8]==1 else 0, 1 if inf[9]==1 else 0, now))
                   conn.commit()
+              for r_it in conn.execute("SELECT item_id, name, acronym, rap, value FROM items").fetchall():
+                  iid_r = int(r_it["item_id"])
+                  if iid_r not in items_map or items_map[iid_r]["value"] <= 0:
+                      items_map[iid_r] = {"item_id": iid_r, "name": str(r_it["name"]), "acronym": str(r_it["acronym"] or ""), "rap": int(r_it["rap"] or 0), "value": int(r_it["value"] or 0)}
 
           def seed_ads():
               ads = get_json("https://api.rolimons.com/tradeads/v1/getrecentads")
@@ -163,7 +193,7 @@ jobs:
           seen_msgs = set()
           did_initial_backfill = False
           def poll_vr():
-              nonlocal did_initial_backfill
+              global did_initial_backfill
               chan = os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip() or "535250426061258753"
               tok = os.environ.get("DISCORD_SCANNER_TOKEN", "").strip()
               if not chan or not tok:
@@ -220,12 +250,31 @@ jobs:
                           all_it = []
                           for s_p in sp: all_it.extend(extract_seg(s_p))
                           if len(all_it) >= 2:
-                              ia, ib = (all_it[1:], [all_it[0]]) if (va and vb and abs(all_it[0]["value"] - vb) < abs(all_it[0]["value"] - va)) else ([all_it[0]], all_it[1:])
+                              if va and vb:
+                                  n_it = len(all_it)
+                                  best_sp, best_err = None, float("inf")
+                                  for mask in range(1, (1 << n_it) - 1):
+                                      sa_l = [all_it[i] for i in range(n_it) if (mask & (1 << i))]
+                                      sb_l = [all_it[i] for i in range(n_it) if not (mask & (1 << i))]
+                                      err = abs(sum(x["value"] for x in sa_l) - va) + abs(sum(x["value"] for x in sb_l) - vb)
+                                      if err < best_err:
+                                          best_err, best_sp = err, (sa_l, sb_l)
+                                  ia, ib = best_sp if best_sp else ([all_it[0]], all_it[1:])
+                              else:
+                                  ia, ib = [all_it[0]], all_it[1:]
                   if not ia or not ib:
                       continue
                   now = int(time.time())
-                  fva = va if va else sum(x["value"] for x in ia)
-                  fvb = vb if vb else sum(x["value"] for x in ib)
+                  sum_a = sum(x["value"] for x in ia)
+                  sum_b = sum(x["value"] for x in ib)
+                  if va and abs(sum_a - va) > max(15000, va * 0.25):
+                      continue
+                  if vb and abs(sum_b - vb) > max(15000, vb * 0.25):
+                      continue
+                  if va and vb and (abs(sum_a - vb) + abs(sum_b - va) + 3000 < abs(sum_a - va) + abs(sum_b - vb)):
+                      va, vb = vb, va
+                  fva = va if va else sum_a
+                  fvb = vb if vb else sum_b
                   fra = sum(x["rap"] for x in ia) or fva
                   frb = sum(x["rap"] for x in ib) or fvb
                   fop = op_d if op_d is not None else abs(fva - fvb)
@@ -235,13 +284,20 @@ jobs:
                       cur = conn.execute("INSERT INTO trades (user_a_id,user_a_name,user_b_id,user_b_name,items_a_json,items_b_json,value_a,rap_a,value_b,rap_b,op_value,op_rap,trade_type,detected_at) VALUES (888002,?,888003,?,?,?,?,?,?,?,?,?,?,?)",
                           (s_u, r_u, json.dumps(ia), json.dumps(ib), fva, fra, fvb, frb, fop, abs(fra-frb), tt, now))
                       tid = cur.lastrowid
-                      for x in ia: conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'A', 0, ?,?,?,?, 0, ?)", (tid, x["item_id"], x["value"], x["rap"], fvb, fva, now))
-                      for x in ib: conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'B', 0, ?,?,?,?, 0, ?)", (tid, x["item_id"], x["value"], x["rap"], fva, fvb, now))
+                      eff_a = max(fva, sum_a)
+                      eff_b = max(fvb, sum_b)
+                      for x in ia:
+                          rop_a = int(eff_b - x["value"]) if len(ia) == 1 else int(round((eff_b - sum_a) * (x["value"] / max(1, sum_a))))
+                          conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'A', 0, ?,?,?,?,?, ?)", (tid, x["item_id"], x["value"], x["rap"], eff_b, sum_a, rop_a, now))
+                      for x in ib:
+                          rop_b = int(eff_a - x["value"]) if len(ib) == 1 else int(round((eff_a - sum_b) * (x["value"] / max(1, sum_b))))
+                          conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'B', 0, ?,?,?,?,?, ?)", (tid, x["item_id"], x["value"], x["rap"], eff_a, sum_b, rop_b, now))
                       conn.commit()
 
           refresh_items()
           seed_ads()
           poll_vr()
+          git_checkpoint()
 
           last_ads = time.time()
           last_items = time.time()
@@ -321,6 +377,8 @@ jobs:
                       continue
                   va, ra = sum(x["value"] for x in ia), sum(x["rap"] for x in ia)
                   vb, rb = sum(x["value"] for x in ib), sum(x["rap"] for x in ib)
+                  if va <= 0 or vb <= 0:
+                      continue
                   na_r = conn.execute("SELECT username FROM traders WHERE user_id=?", (ua,)).fetchone()
                   nb_r = conn.execute("SELECT username FROM traders WHERE user_id=?", (ub,)).fetchone()
                   na = na_r["username"] if na_r and na_r["username"] else (get_json(f"https://users.roblox.com/v1/users/{ua}") or {}).get("name", f"User_{ua}")
@@ -329,8 +387,12 @@ jobs:
                   cur = conn.execute("INSERT INTO trades (user_a_id,user_a_name,user_b_id,user_b_name,items_a_json,items_b_json,value_a,rap_a,value_b,rap_b,op_value,op_rap,trade_type,detected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (ua, na, ub, nb, json.dumps(ia), json.dumps(ib), va, ra, vb, rb, abs(va-vb), abs(ra-rb), tt, now))
                   tid = cur.lastrowid
-                  for x in ia: conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'A', ?, ?,?,?,?, 0, ?)", (tid, x["item_id"], x["uaid"], x["value"], x["rap"], vb, va, now))
-                  for x in ib: conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'B', ?, ?,?,?,?, 0, ?)", (tid, x["item_id"], x["uaid"], x["value"], x["rap"], va, vb, now))
+                  for x in ia:
+                      rop_a = int(vb - x["value"]) if len(ia) == 1 else int(round((vb - va) * (x["value"] / max(1, va))))
+                      conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'A', ?, ?,?,?,?,?, ?)", (tid, x["item_id"], x["uaid"], x["value"], x["rap"], vb, va, rop_a, now))
+                  for x in ib:
+                      rop_b = int(va - x["value"]) if len(ib) == 1 else int(round((va - vb) * (x["value"] / max(1, vb))))
+                      conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'B', ?, ?,?,?,?,?, ?)", (tid, x["item_id"], x["uaid"], x["value"], x["rap"], va, vb, rop_b, now))
                   mids = [x["id"] for x in m_ab + m_ba]
                   conn.execute(f"UPDATE uaid_moves SET matched_trade_id=? WHERE id IN ({','.join('?' for _ in mids)})", [tid, *mids])
                   conn.commit()

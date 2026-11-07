@@ -4,3 +4,4 @@ pillow
 pytest
 httpx
 huggingface_hub
+discord.py>=2.4.0

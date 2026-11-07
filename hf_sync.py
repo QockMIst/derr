@@ -7,13 +7,6 @@ from typing import Optional
 
 
 class HuggingFacePersistence:
-    """
-    Optional SQLite backup & restore for Hugging Face Spaces (free 24/7 CPU hosting).
-    When `HF_TOKEN` and `HF_DATASET_REPO` (e.g. 'username/void-db-backup') are set in
-    Space Secrets/Variables, the app restores `void_data.sqlite3` on boot and backs it up
-    every 10 minutes so container restarts never wipe recorded proofs.
-    """
-
     def __init__(self, db_path: Path, interval_seconds: int = 600):
         self.db_path = Path(db_path)
         self.interval_seconds = interval_seconds
@@ -28,7 +21,7 @@ class HuggingFacePersistence:
         try:
             req = urllib.request.Request(
                 url,
-                headers={"Authorization": f"Bearer {self.hf_token}", "User-Agent": "VoidLocal/2.0"},
+                headers={"Authorization": f"Bearer {self.hf_token}", "User-Agent": "Carbon/1.0"},
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = resp.read()
@@ -43,7 +36,7 @@ class HuggingFacePersistence:
         if not self.enabled or not self.db_path.exists():
             return False
         try:
-            from huggingface_hub import HfApi  # type: ignore
+            from huggingface_hub import HfApi
 
             api = HfApi(token=self.hf_token)
             api.upload_file(

@@ -137,8 +137,102 @@ def _call_ocr_space(img_bytes: bytes, engine: int = 2) -> str:
     return ""
 
 
+def _call_rapidocr_boxes(img_bytes: bytes) -> List[Tuple[List[float], str]]:
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+
+        global _RAPID_ENGINE
+        if "_RAPID_ENGINE" not in globals() or _RAPID_ENGINE is None:
+            _RAPID_ENGINE = RapidOCR()
+        res, _ = _RAPID_ENGINE(img_bytes)
+        if res:
+            parsed = []
+            for line in res:
+                box = line[0]
+                text = str(line[1]).strip()
+                xs = [pt[0] for pt in box]
+                ys = [pt[1] for pt in box]
+                parsed.append(([min(xs), max(xs), min(ys), max(ys)], text))
+            return parsed
+    except Exception:
+        pass
+    return []
+
+
+def _extract_items_from_boxes(
+    boxes: List[Tuple[List[float], str]], items_catalog: Dict[int, Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    gave_y = None
+    recv_y = None
+    for b, t in boxes:
+        tl = t.lower()
+        if "items you gave" in tl:
+            gave_y = b[2]
+        elif "items you received" in tl:
+            recv_y = b[2]
+
+    if gave_y is None or recv_y is None:
+        return [], []
+
+    def cluster_side(lines: List[Tuple[List[float], str]]) -> List[Dict[str, Any]]:
+        slots: List[Dict[str, Any]] = []
+        for box, text in lines:
+            tl = text.lower()
+            if any(skip in tl for skip in ("total value", "robux offered", "items you", "trade with")):
+                continue
+            if re.match(r"^[米茶#\d\s\W]+$", text) or re.match(r"^[QO0]?\s*[\d,.]+$", text):
+                continue
+            cx = (box[0] + box[1]) / 2.0
+            cy = (box[2] + box[3]) / 2.0
+            placed = False
+            for s in slots:
+                if abs(s["cx"] - cx) < 95 and abs(s["cy"] - cy) < 145:
+                    s["lines"].append((cy, text))
+                    s["cy"] = (s["cy"] + cy) / 2.0
+                    placed = True
+                    break
+            if not placed:
+                slots.append({"cx": cx, "cy": cy, "lines": [(cy, text)]})
+        matched: List[Dict[str, Any]] = []
+        for s in slots:
+            s["lines"].sort(key=lambda x: x[0])
+            comb = " ".join(l[1] for l in s["lines"]).strip()
+            it = _strict_item_match(comb, items_catalog)
+            if it and len(matched) < 8:
+                matched.append(it)
+        return matched
+
+    gave_lines = [item for item in boxes if gave_y < item[0][2] < recv_y]
+    recv_lines = [item for item in boxes if item[0][2] > recv_y]
+    return cluster_side(gave_lines), cluster_side(recv_lines)
+
+
+def _call_rapidocr_local(img_bytes: bytes) -> str:
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+
+        global _RAPID_ENGINE
+        if "_RAPID_ENGINE" not in globals() or _RAPID_ENGINE is None:
+            _RAPID_ENGINE = RapidOCR()
+        res, _ = _RAPID_ENGINE(img_bytes)
+        if res:
+            return "\n".join(str(line[1]) for line in res if len(line) > 1).strip()
+    except Exception:
+        pass
+    return ""
+
+
 def ocr_trade_screenshot_bytes(image_bytes: bytes) -> str:
+    local_txt = _call_rapidocr_local(image_bytes)
+    if len(local_txt) >= 15:
+        return local_txt
+
     variants = _preprocess_image_for_ocr(image_bytes)
+    for v in variants[:1]:
+        local_v = _call_rapidocr_local(v)
+        if len(local_v) >= 15:
+            return local_v
+
     try:
         from PIL import Image
         import pytesseract
@@ -291,20 +385,19 @@ def _find_all_fuzzy_section_splits(ocr_text: str) -> List[Tuple[str, str]]:
         clean = re.sub(r"\s+", " ", clean)
         if not clean:
             continue
-        if (
-            "you gave" in clean
-            or "you gove" in clean
-            or "yau gave" in clean
-            or difflib.SequenceMatcher(None, clean[:15], "items you gave").ratio() >= 0.65
-            or difflib.SequenceMatcher(None, clean[-9:], "you gave").ratio() >= 0.72
-        ):
+        score_gave = max(
+            1.0 if any(k in clean for k in ("you gave", "you gove", "yau gave", "items you gave")) else 0.0,
+            difflib.SequenceMatcher(None, clean, "items you gave").ratio(),
+            difflib.SequenceMatcher(None, clean[-8:], "you gave").ratio(),
+        )
+        score_recv = max(
+            1.0 if any(k in clean for k in ("you received", "you rece", "items you received")) else 0.0,
+            difflib.SequenceMatcher(None, clean, "items you received").ratio(),
+            difflib.SequenceMatcher(None, clean[-12:], "you received").ratio(),
+        )
+        if score_gave >= 0.70 and score_gave > score_recv:
             markers.append((idx, "GAVE"))
-        elif (
-            "you received" in clean
-            or "you rece" in clean
-            or difflib.SequenceMatcher(None, clean[:19], "items you received").ratio() >= 0.65
-            or difflib.SequenceMatcher(None, clean[-12:], "you received").ratio() >= 0.72
-        ):
+        elif score_recv >= 0.70 and score_recv > score_gave:
             markers.append((idx, "RECV"))
 
     if not markers:
@@ -345,30 +438,24 @@ def _extract_items_from_ocr_text(
             return []
         matched: List[Dict[str, Any]] = []
         seen_ids = set()
-        b_norm = re.sub(r"\s+", " ", block.lower())
+
+        b_norm = block.lower()
+        b_norm = re.sub(r"(?i)theclassicroblox", "the classic roblox", b_norm)
+        b_norm = re.sub(r"[\r\n]+", " ", b_norm)
+        b_norm = re.sub(r"[^a-zA-Z0-9\s:!]", " ", b_norm)
+        b_norm = re.sub(r"\s+", " ", b_norm).strip()
 
         for it in catalog_sorted:
             nm = it["name"].lower().strip()
-            if len(nm) >= 5 and nm in b_norm:
-                count = min(4, len(re.findall(re.escape(nm), b_norm)))
-                if it["item_id"] not in seen_ids:
-                    seen_ids.add(it["item_id"])
-                    for _ in range(max(1, count)):
-                        if len(matched) < 8:
-                            matched.append(it)
-
-        for it in catalog_sorted:
-            if it["item_id"] in seen_ids:
-                continue
-            nm = it["name"].lower().strip()
-            if len(nm) >= 16:
-                stem = nm[:14].strip()
-                if len(stem) >= 11 and stem in b_norm:
-                    count = min(4, len(re.findall(re.escape(stem), b_norm)))
-                    seen_ids.add(it["item_id"])
-                    for _ in range(max(1, count)):
-                        if len(matched) < 8:
-                            matched.append(it)
+            if len(nm) >= 3:
+                pattern = r"\b" + re.escape(nm) + r"(?:\b|(?=[!]))"
+                if re.search(pattern, b_norm):
+                    count = min(4, len(re.findall(pattern, b_norm)))
+                    if it["item_id"] not in seen_ids:
+                        seen_ids.add(it["item_id"])
+                        for _ in range(max(1, count)):
+                            if len(matched) < 8:
+                                matched.append(it)
 
         raw_lines = [
             re.sub(r"[^a-zA-Z0-9\s\-':!]", "", ln).strip().lower()
@@ -519,11 +606,20 @@ def parse_value_request_text(
                 all_slash_items.extend(_extract_items_from_segment(sp, items_catalog))
             if len(all_slash_items) >= 2:
                 if val_a and val_b:
-                    first_val = int(all_slash_items[0].get("value", 0))
-                    rest_val = sum(int(x.get("value", 0)) for x in all_slash_items[1:])
-                    if abs(first_val - val_b) + abs(rest_val - val_a) < abs(first_val - val_a) + abs(rest_val - val_b):
-                        side_a_items = all_slash_items[1:]
-                        side_b_items = [all_slash_items[0]]
+                    n_it = len(all_slash_items)
+                    best_split = None
+                    best_err = float("inf")
+                    for mask in range(1, (1 << n_it) - 1):
+                        sub_a = [all_slash_items[i] for i in range(n_it) if (mask & (1 << i))]
+                        sub_b = [all_slash_items[i] for i in range(n_it) if not (mask & (1 << i))]
+                        sum_a = sum(int(x.get("value", 0)) for x in sub_a)
+                        sum_b = sum(int(x.get("value", 0)) for x in sub_b)
+                        err = abs(sum_a - val_a) + abs(sum_b - val_b)
+                        if err < best_err:
+                            best_err = err
+                            best_split = (sub_a, sub_b)
+                    if best_split:
+                        side_a_items, side_b_items = best_split
                     else:
                         side_a_items = [all_slash_items[0]]
                         side_b_items = all_slash_items[1:]
@@ -559,12 +655,24 @@ def parse_value_request_text(
         and bool(side_b_items)
         and val_a is not None
         and val_b is not None
-        and abs(txt_val_a - val_a) <= max(15000, val_a * 0.12)
-        and abs(txt_val_b - val_b) <= max(15000, val_b * 0.12)
+        and abs(txt_val_a - val_a) <= max(5000, val_a * 0.03)
+        and abs(txt_val_b - val_b) <= max(5000, val_b * 0.03)
     )
 
+    if all_imgs:
+        for b in all_imgs:
+            if not b:
+                continue
+            boxes = _call_rapidocr_boxes(b)
+            if boxes:
+                box_a, box_b = _extract_items_from_boxes(boxes, items_catalog)
+                if box_a and box_b:
+                    side_a_items = box_a
+                    side_b_items = box_b
+                    break
+
     ocr_text = ""
-    if all_imgs and not text_complete:
+    if not side_a_items and all_imgs and not text_complete:
         ocr_chunks = [ocr_trade_screenshot_bytes(b) for b in all_imgs if b]
         ocr_text = "\n".join(c for c in ocr_chunks if c)
 
@@ -608,6 +716,12 @@ def parse_value_request_text(
     calc_rap_a = sum(int(x.get("rap", 0)) for x in side_a_items)
     calc_val_b = sum(int(x.get("value", 0)) for x in side_b_items)
     calc_rap_b = sum(int(x.get("rap", 0)) for x in side_b_items)
+
+    if val_a is not None and val_b is not None:
+        direct_err = abs(calc_val_a - val_a) + abs(calc_val_b - val_b)
+        swapped_err = abs(calc_val_a - val_b) + abs(calc_val_b - val_a)
+        if swapped_err + 3000 < direct_err:
+            val_a, val_b = val_b, val_a
 
     final_val_a = val_a if val_a is not None else calc_val_a
     final_val_b = val_b if val_b is not None else calc_val_b
@@ -677,14 +791,29 @@ def poll_discord_value_requests_channel(
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "application/json",
     }
-    try:
-        req = urllib.request.Request(url, headers=hdrs)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            messages = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except Exception:
-        return 0
+    is_initial = len(seen_message_ids) == 0
+    pages = 10 if is_initial else 1
+    messages: List[Dict[str, Any]] = []
+    before_id: Optional[str] = None
+    for _ in range(pages):
+        page_url = (
+            f"https://discord.com/api/v10/channels/{channel_id.strip()}/messages?limit={'100' if is_initial else '15'}"
+            + (f"&before={before_id}" if before_id else "")
+        )
+        try:
+            req = urllib.request.Request(page_url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                batch = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if not isinstance(batch, list) or not batch:
+                break
+            messages.extend(batch)
+            before_id = str(batch[-1].get("id", ""))
+            if is_initial:
+                time.sleep(0.4)
+        except Exception:
+            break
 
-    if not isinstance(messages, list):
+    if not messages:
         return 0
 
     imported = 0
@@ -696,7 +825,14 @@ def poll_discord_value_requests_channel(
         seen_message_ids.add(mid)
         content = str(msg.get("content") or "")
         parsed = parse_value_request_text(content, items_catalog)
-        if not parsed and ocr_calls < 3:
+        val_sum_a = sum(int(x.get("value", 0)) for x in parsed["items_a"]) if parsed else 0
+        val_sum_b = sum(int(x.get("value", 0)) for x in parsed["items_b"]) if parsed else 0
+        needs_ocr = (
+            not parsed
+            or abs(val_sum_a - int(parsed["value_a"])) > 5000
+            or abs(val_sum_b - int(parsed["value_b"])) > 5000
+        )
+        if needs_ocr and ocr_calls < 5:
             attachments = msg.get("attachments") or []
             img_list: List[bytes] = []
             for att in attachments[:2]:
@@ -710,12 +846,14 @@ def poll_discord_value_requests_channel(
                         pass
             if img_list:
                 ocr_calls += 1
-                parsed = parse_value_request_text(
+                parsed_ocr = parse_value_request_text(
                     content,
                     items_catalog,
                     image_bytes=img_list[0],
                     extra_images=img_list[1:] if len(img_list) > 1 else None,
                 )
+                if parsed_ocr:
+                    parsed = parsed_ocr
         if parsed:
             tid = save_parsed_value_request_proof(db, parsed)
             if tid > 0:

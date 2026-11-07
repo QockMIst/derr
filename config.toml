@@ -1,23 +1,28 @@
 [sniper]
-poll_interval_seconds = 20
+poll_interval_seconds = 10
 min_deal_percent = 5.0
 cooldown_seconds = 1800
 filter_projecteds = true
 filter_tag_only_requests = true
 
 [tracker]
-scan_interval_seconds = 2.0
+scan_interval_seconds = 0.6
 match_window_seconds = 7200
-max_tracked_traders = 3000
-# Optional: paste your GitHub raw SQLite URL here so local app auto-pulls 24/7 cloud proofs:
-# e.g. "https://raw.githubusercontent.com/YOUR_USERNAME/void-scanner/main/void_data.sqlite3"
-github_db_raw_url = ""
+max_tracked_traders = 5000
+github_db_raw_url = "https://raw.githubusercontent.com/QockMlst/derr/main/void_data.sqlite3"
+github_token = ""
 
 [engine]
-default_mode = "v3.1"
+default_mode = "v4"
 risk_edge_1v1_rate = 0.05
 min_proofs_for_full_weight = 3
 proof_max_age_days = 30
+
+[discord]
+bot_token = "MTU2ODQyNzIxODUxMjY1MDQ0MQ.G71zcY.jETPRdIc2VU5ODwkGxXHuFbAynuTyAVeXsAGfw"
+owner_id = 1388335689229275220
+value_requests_channel_id = "535250426061258753"
+scanner_token = "MTEwNTg1MDM0ODA2NjgzNjU3Mg.Gf8vXb.QDrvuh1MhjSM793anCEmPiLLDT50RoeEOkpg1Q"
 
 [server]
 host = "127.0.0.1"

@@ -46,19 +46,15 @@ def render_trade_card_png(
     request_items: List[Dict[str, Any]],
     tags: Optional[List[str]] = None,
 ) -> bytes:
-    """
-    Renders a dark-themed Void-style Offer / Request comparison card as PNG bytes
-    using bundled Inter and JetBrains Mono TrueType fonts.
-    """
     width, height = 760, 280
-    bg_color = (24, 26, 31)
-    header_color = (34, 37, 44)
-    slot_color = (43, 47, 56)
-    text_white = (242, 243, 245)
-    text_muted = (155, 162, 175)
-    blue_val = (72, 168, 255)
-    green_rap = (67, 198, 128)
-    red_op = (240, 71, 71)
+    bg_color = (16, 22, 34)
+    header_color = (24, 34, 52)
+    slot_color = (32, 45, 68)
+    text_white = (240, 246, 255)
+    text_muted = (148, 163, 184)
+    blue_val = (56, 189, 248)
+    green_rap = (34, 197, 94)
+    red_op = (239, 68, 68)
 
     img = Image.new("RGB", (width, height), bg_color)
     draw = ImageDraw.Draw(img)
@@ -68,7 +64,6 @@ def render_trade_card_png(
     font_mono = _load_font(14, mono=True)
     font_footer = _load_font(13, mono=True)
 
-    # Header bar
     draw.rectangle([0, 0, width, 38], fill=header_color)
     draw.text((160, 10), "Offer", fill=text_white, font=font_header)
     draw.text((530, 10), "Request", fill=text_white, font=font_header)
@@ -84,7 +79,6 @@ def render_trade_card_png(
             if thumb:
                 img.paste(thumb, (sx + 4, sy + 4), thumb)
             else:
-                # Wrap full item name cleanly inside the slot without ugly truncation
                 full_name = str(it.get("name", "Item"))
                 wrapped = "\n".join(textwrap.wrap(full_name, width=9)[:3])
                 draw.multiline_text((sx + 6, sy + 14), wrapped, fill=text_white, font=font_small, spacing=2)
@@ -110,7 +104,7 @@ def render_trade_card_png(
         fill=op_color,
         font=font_footer,
     )
-    draw.text((525, 254), "Void Local | Market Tools", fill=text_muted, font=font_small)
+    draw.text((545, 254), "Carbon | Market Suite", fill=text_muted, font=font_small)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")

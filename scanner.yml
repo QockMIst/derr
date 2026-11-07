@@ -1,0 +1,60 @@
+name: 24/7 Carbon Bot & Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+concurrency:
+  group: carbon-24-7-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies & OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+          pip install discord.py pillow pytesseract fastapi uvicorn pydantic
+
+      - name: Run Carbon Discord App + #value-requests + UAID Scanner (5.5 Hours Non-Stop)
+        env:
+          MAX_RUN_SECONDS: "19800"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_WORKFLOW_FILE: "scanner.yml"
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_SCANNER_TOKEN: ${{ secrets.DISCORD_SCANNER_TOKEN }}
+          VALUE_REQUESTS_CHANNEL_ID: "535250426061258753"
+        run: |
+          python cloud_scan_batch.py
+
+      - name: Final DB Commit & Push
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add void_data.sqlite3
+          git diff --staged --quiet || (git pull --rebase -X ours && git commit -m "Auto-update trade DB" && git push)
+
+      - name: Self-Chain Next Run Immediately
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run scanner.yml --ref main || true

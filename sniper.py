@@ -1,4 +1,3 @@
-import json
 import time
 from typing import Any, Dict, List, Optional
 from data.rolimons import TAG_MAP
@@ -29,6 +28,21 @@ def make_ad_signature(ad: Dict[str, Any]) -> str:
     )
 
 
+def _side_matches_query(items: List[Dict[str, Any]], query: str) -> bool:
+    q = query.strip().lower()
+    if not q:
+        return True
+    for it in items:
+        if (
+            q == str(it.get("item_id", ""))
+            or q == str(it.get("acronym", "")).lower()
+            or q in str(it.get("name", "")).lower()
+            or (it.get("acronym") and q in str(it["acronym"]).lower())
+        ):
+            return True
+    return False
+
+
 class AdSniper:
     def __init__(
         self,
@@ -41,7 +55,6 @@ class AdSniper:
         self.cooldown_seconds = cooldown_seconds
         self.filter_projecteds = filter_projecteds
         self.filter_tag_only_requests = filter_tag_only_requests
-        # {user_id: (signature, last_seen_ts)}
         self._seen_signatures: Dict[int, tuple[str, int]] = {}
         self._seen_ad_ids: set[int] = set()
 
@@ -59,11 +72,9 @@ class AdSniper:
         if not offer_ids:
             return None
 
-        # Filter out ads only including tags on request side
         if self.filter_tag_only_requests and not request_ids:
             return None
 
-        # Filter out if request side asks explicitly for Projecteds tag (9)
         if self.filter_projecteds and 9 in request_tags:
             return None
 
@@ -98,7 +109,6 @@ class AdSniper:
         if deal_percent < self.min_deal_percent:
             return None
 
-        # Deduplication by poster + signature + cooldown
         ad_id = int(ad["ad_id"])
         if ad_id in self._seen_ad_ids:
             return None
@@ -147,3 +157,24 @@ class AdSniper:
                 "send_trade": f"https://www.roblox.com/users/{user_id}/trade",
             },
         }
+
+    @staticmethod
+    def filter_deals(
+        deals: List[Dict[str, Any]],
+        bucket: str = "ALL",
+        min_deal: float = 5.0,
+        sends_query: str = "",
+        wants_query: str = "",
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for d in deals:
+            if d["deal_percent"] < min_deal:
+                continue
+            if bucket != "ALL" and d["bucket"] != bucket:
+                continue
+            if sends_query and not _side_matches_query(d.get("offer_items", []), sends_query):
+                continue
+            if wants_query and not _side_matches_query(d.get("request_items", []), wants_query):
+                continue
+            out.append(d)
+        return out
