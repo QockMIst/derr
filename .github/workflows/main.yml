@@ -5,167 +5,357 @@ on:
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
+concurrency:
+  group: void-scanner-main
+  cancel-in-progress: false
+
 permissions:
   contents: write
+  actions: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run Self-Contained Void Scanner Batch
+      - name: Install Python & OCR packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+          pip install discord.py pillow pytesseract fastapi uvicorn pydantic
+
+      - name: Run 24/7 Discord Bot + Value Requests Scanner + Fast UAID Scanner
         env:
-          SCAN_BATCH_SIZE: "120"
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_SCANNER_TOKEN: ${{ secrets.DISCORD_SCANNER_TOKEN }}
+          VALUE_REQUESTS_CHANNEL_ID: ${{ secrets.VALUE_REQUESTS_CHANNEL_ID }}
         run: |
           python3 - << 'EOF'
-          import json, os, sqlite3, time, urllib.request
+          import asyncio, difflib, io, json, os, re, sqlite3, subprocess, sys, threading, time, urllib.request
           from collections import defaultdict
           from pathlib import Path
 
-          # Use existing cloud_scan_batch.py if all folders exist, otherwise run built-in scanner
-          if Path("cloud_scan_batch.py").exists() and Path("data/rolimons.py").exists() and Path("tracker/scanner.py").exists():
-              import cloud_scan_batch
-              cloud_scan_batch.run_batch(int(os.environ.get("SCAN_BATCH_SIZE", "120")))
-              raise SystemExit(0)
-
           DB_PATH = Path("void_data.sqlite3")
-          HEADERS = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-              "Accept": "application/json",
-          }
+          HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+          START_TS = time.time()
+          MAX_SECONDS = 19200
 
-          def get_json(url, timeout=12):
+          def get_json(url, hdrs=None, timeout=10):
               try:
-                  req = urllib.request.Request(url, headers=HEADERS)
+                  req = urllib.request.Request(url, headers=hdrs or HEADERS)
                   with urllib.request.urlopen(req, timeout=timeout) as r:
                       return json.loads(r.read().decode("utf-8", errors="replace"))
               except Exception:
                   return None
 
-          conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+          conn = sqlite3.connect(str(DB_PATH), timeout=30.0, check_same_thread=False)
           conn.row_factory = sqlite3.Row
           conn.executescript("""
-              CREATE TABLE IF NOT EXISTS items (
-                  item_id INTEGER PRIMARY KEY, name TEXT NOT NULL, acronym TEXT NOT NULL DEFAULT '',
-                  rap INTEGER NOT NULL DEFAULT 0, value INTEGER NOT NULL DEFAULT 0, default_value INTEGER NOT NULL DEFAULT 0,
-                  demand INTEGER NOT NULL DEFAULT -1, trend INTEGER NOT NULL DEFAULT -1, projected INTEGER NOT NULL DEFAULT 0,
-                  hyped INTEGER NOT NULL DEFAULT 0, rare INTEGER NOT NULL DEFAULT 0, thumbnail_url TEXT DEFAULT '',
-                  source TEXT NOT NULL DEFAULT 'rolimons', manual_value INTEGER DEFAULT NULL,
-                  collectible_item_id TEXT DEFAULT '', updated_at INTEGER NOT NULL DEFAULT 0
-              );
-              CREATE TABLE IF NOT EXISTS traders (
-                  user_id INTEGER PRIMARY KEY, username TEXT NOT NULL DEFAULT '',
-                  last_ad_at INTEGER NOT NULL DEFAULT 0, last_scanned_at INTEGER NOT NULL DEFAULT 0, scan_count INTEGER NOT NULL DEFAULT 0
-              );
-              CREATE TABLE IF NOT EXISTS owners (
-                  uaid INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, user_id INTEGER NOT NULL, seen_at INTEGER NOT NULL
-              );
-              CREATE TABLE IF NOT EXISTS uaid_moves (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT, uaid INTEGER NOT NULL, item_id INTEGER NOT NULL,
-                  from_user_id INTEGER NOT NULL, to_user_id INTEGER NOT NULL, detected_at INTEGER NOT NULL,
-                  matched_trade_id INTEGER DEFAULT NULL
-              );
-              CREATE TABLE IF NOT EXISTS trades (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT, user_a_id INTEGER NOT NULL, user_a_name TEXT NOT NULL DEFAULT '',
-                  user_b_id INTEGER NOT NULL, user_b_name TEXT NOT NULL DEFAULT '', items_a_json TEXT NOT NULL,
-                  items_b_json TEXT NOT NULL, value_a INTEGER NOT NULL, rap_a INTEGER NOT NULL,
-                  value_b INTEGER NOT NULL, rap_b INTEGER NOT NULL, op_value INTEGER NOT NULL, op_rap INTEGER NOT NULL,
-                  trade_type TEXT NOT NULL DEFAULT 'SWAP', detected_at INTEGER NOT NULL, predicted_op INTEGER DEFAULT NULL
-              );
-              CREATE TABLE IF NOT EXISTS trade_items (
-                  trade_id INTEGER NOT NULL, item_id INTEGER NOT NULL, side TEXT NOT NULL, uaid INTEGER NOT NULL DEFAULT 0,
-                  item_value INTEGER NOT NULL, item_rap INTEGER NOT NULL, other_side_value INTEGER NOT NULL,
-                  side_total_value INTEGER NOT NULL, realized_op INTEGER NOT NULL, detected_at INTEGER NOT NULL,
-                  PRIMARY KEY (trade_id, item_id, uaid)
-              );
+              CREATE TABLE IF NOT EXISTS items (item_id INTEGER PRIMARY KEY, name TEXT, acronym TEXT DEFAULT '', rap INTEGER DEFAULT 0, value INTEGER DEFAULT 0, default_value INTEGER DEFAULT 0, demand INTEGER DEFAULT -1, trend INTEGER DEFAULT -1, projected INTEGER DEFAULT 0, hyped INTEGER DEFAULT 0, rare INTEGER DEFAULT 0, thumbnail_url TEXT DEFAULT '', source TEXT DEFAULT 'rolimons', manual_value INTEGER DEFAULT NULL, collectible_item_id TEXT DEFAULT '', updated_at INTEGER DEFAULT 0);
+              CREATE TABLE IF NOT EXISTS traders (user_id INTEGER PRIMARY KEY, username TEXT DEFAULT '', last_ad_at INTEGER DEFAULT 0, last_scanned_at INTEGER DEFAULT 0, scan_count INTEGER DEFAULT 0);
+              CREATE TABLE IF NOT EXISTS owners (uaid INTEGER PRIMARY KEY, item_id INTEGER, user_id INTEGER, seen_at INTEGER);
+              CREATE TABLE IF NOT EXISTS uaid_moves (id INTEGER PRIMARY KEY AUTOINCREMENT, uaid INTEGER, item_id INTEGER, from_user_id INTEGER, to_user_id INTEGER, detected_at INTEGER, matched_trade_id INTEGER DEFAULT NULL);
+              CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, user_a_id INTEGER, user_a_name TEXT DEFAULT '', user_b_id INTEGER, user_b_name TEXT DEFAULT '', items_a_json TEXT, items_b_json TEXT, value_a INTEGER, rap_a INTEGER, value_b INTEGER, rap_b INTEGER, op_value INTEGER, op_rap INTEGER, trade_type TEXT DEFAULT 'SWAP', detected_at INTEGER, predicted_op INTEGER DEFAULT NULL);
+              CREATE TABLE IF NOT EXISTS trade_items (trade_id INTEGER, item_id INTEGER, side TEXT, uaid INTEGER DEFAULT 0, item_value INTEGER, item_rap INTEGER, other_side_value INTEGER, side_total_value INTEGER, realized_op INTEGER, detected_at INTEGER, PRIMARY KEY (trade_id, item_id, uaid));
           """)
+          conn.execute("DELETE FROM trades WHERE items_a_json = items_b_json OR items_a_json LIKE '%\"item_id\": 0%' OR items_b_json LIKE '%\"item_id\": 0%'")
+          conn.commit()
 
-          now = int(time.time())
-          d_items = get_json("https://api.rolimons.com/items/v2/itemdetails")
+          for cand in [Path("."), Path("void_tool")]:
+              if (cand / "bot.py").exists():
+                  sys.path.insert(0, str(cand.resolve()))
+                  bot_tok = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+                  if bot_tok:
+                      def _run_bot():
+                          try:
+                              from bot import client as discord_client
+                              loop = asyncio.new_event_loop()
+                              asyncio.set_event_loop(loop)
+                              loop.run_until_complete(discord_client.start(bot_tok))
+                          except Exception as e:
+                              print("[Bot Error]", e, flush=True)
+                      threading.Thread(target=_run_bot, daemon=True).start()
+                  break
+
+          def git_checkpoint():
+              try:
+                  subprocess.run(["git", "config", "user.name", "void-scanner-bot"], check=False)
+                  subprocess.run(["git", "config", "user.email", "void-scanner-bot@users.noreply.github.com"], check=False)
+                  subprocess.run(["git", "add", "-f", "void_data.sqlite3"], check=False)
+                  if subprocess.run(["git", "diff", "--staged", "--quiet"]).returncode != 0:
+                      subprocess.run(["git", "commit", "-m", "Update proofs & UAID database"], check=False)
+                      subprocess.run(["git", "pull", "--rebase", "-X", "ours"], check=False)
+                      subprocess.run(["git", "push"], check=False)
+                      print("[Checkpoint] Saved void_data.sqlite3 to GitHub", flush=True)
+              except Exception:
+                  pass
+
           items_map = {}
-          if d_items and d_items.get("success"):
-              rows = []
-              for k, v in d_items.get("items", {}).items():
-                  iid = int(k)
-                  rap = max(0, int(v[2] or 0))
-                  val = int(v[3]) if v[3] is not None and v[3] >= 0 else int(v[4] or rap)
-                  items_map[iid] = {"item_id": iid, "name": str(v[0]), "acronym": str(v[1] or ""), "rap": rap, "value": val}
-                  rows.append((iid, str(v[0]), str(v[1] or ""), rap, val, int(v[4] or rap), int(v[5] or -1), int(v[6] or -1), 1 if v[7]==1 else 0, 1 if v[8]==1 else 0, 1 if v[9]==1 else 0, now))
-              conn.executemany("""
-                  INSERT INTO items (item_id,name,acronym,rap,value,default_value,demand,trend,projected,hyped,rare,updated_at)
-                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                  ON CONFLICT(item_id) DO UPDATE SET rap=excluded.rap, value=excluded.value, demand=excluded.demand, updated_at=excluded.updated_at
-              """, rows)
+          def refresh_items():
+              now = int(time.time())
+              roli = get_json("https://api.rolimons.com/items/v2/itemdetails")
+              if roli and roli.get("success"):
+                  for iid_s, inf in (roli.get("items") or {}).items():
+                      iid = int(iid_s)
+                      rap = int(inf[2]) if inf[2] and inf[2] > 0 else 0
+                      val = int(inf[3]) if inf[3] is not None and inf[3] >= 0 else rap
+                      items_map[iid] = {"item_id": iid, "name": str(inf[0]), "acronym": str(inf[1] or ""), "rap": rap, "value": val}
+                      conn.execute("INSERT OR REPLACE INTO items (item_id,name,acronym,rap,value,default_value,demand,trend,projected,hyped,rare,source,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'rolimons',?)",
+                          (iid, str(inf[0]), str(inf[1] or ""), rap, val, rap, int(inf[5] if inf[5] is not None else -1), int(inf[6] if inf[6] is not None else -1), 1 if inf[7]==1 else 0, 1 if inf[8]==1 else 0, 1 if inf[9]==1 else 0, now))
+                  conn.commit()
+
+          def seed_ads():
+              ads = get_json("https://api.rolimons.com/tradeads/v1/getrecentads")
+              if ads and ads.get("success"):
+                  for ad in ads.get("trade_ads", []):
+                      conn.execute("INSERT INTO traders (user_id,username,last_ad_at,last_scanned_at,scan_count) VALUES (?,?,?,0,0) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, last_ad_at=MAX(traders.last_ad_at,excluded.last_ad_at)", (int(ad[2]), str(ad[3]), int(ad[1])))
+                  conn.commit()
+
+          SLANG = {"amethyst homies": "cw ultimate: amethyst addiction", "kodachi": "twin kodachi", "tabby": "8-bit tabby cat", "steelshanks": "captain steelshanks recruiting staff", "obc": "outrageous builders club hard hat", "legit": "perfectly legitimate business hat", "supa": "supa fly cap", "ghos": "ghosdeeri", "pois": "poisoned horns of the toxic wasteland", "vesp": "dominus vespertilio", "noir": "noir periastron psi", "8brc": "8-bit royal crown"}
+          STOP = {"it","to","be","at","the","time","used","was","in","on","of","for","and","or","vs","v","op","lb","lowball","overpay","even","item","items","value","values","sender","receiver","date","r$","robux"}
+
+          def match_item(q):
+              q = re.sub(r"(?i)\br\$\b", " ", q)
+              q = re.sub(r"[^a-zA-Z0-9\s\-':!.]", " ", q).strip().lower()
+              q = re.sub(r"\s+", " ", q)
+              if not q or q in STOP or len(q) < 2 or re.match(r"^\d+[km]?$", q):
+                  return None
+              if q in SLANG:
+                  q = SLANG[q]
+              for it in items_map.values():
+                  if (it.get("acronym") or "").lower() == q:
+                      return it
+              for it in items_map.values():
+                  if it["name"].lower() == q:
+                      return it
+              if len(q) >= 3:
+                  hits = [it for it in items_map.values() if it["name"].lower().startswith(q)]
+                  if hits:
+                      hits.sort(key=lambda x: (-x["value"], len(x["name"])))
+                      return hits[0]
+              return None
+
+          def parse_val(tok):
+              t = tok.strip().lower().replace(",", "").replace(" ", "")
+              m = re.match(r"^(\d+(?:\.\d+)?)\s*([km])?$", t)
+              if not m:
+                  return None
+              n, mult = float(m.group(1)), m.group(2)
+              if mult == "m": return int(round(n * 1_000_000))
+              if mult == "k": return int(round(n * 1_000))
+              return int(round(n * 1_000)) if n < 1000 else int(round(n))
+
+          def extract_seg(seg):
+              c = re.sub(r"(?i)^items?(?:\(s\))?\s*:\s*", "", seg).strip()
+              c = re.sub(r"([a-zA-Z0-9\s\-':!]+?)\s*\(\s*([^)]+)\s*\)", lambda m: f" , {m.group(1).strip()} , " if match_item(m.group(1).strip()) else f" , {m.group(2).strip()} , ", c)
+              c = re.sub(r"\([^)]*\)", ",", c)
+              out = []
+              for p in [x.strip() for x in re.split(r"[,+&\n/]+", c) if x.strip()]:
+                  mm = re.match(r"(?i)^([234])\s*x\s+(.+)$", p)
+                  mult = int(mm.group(1)) if mm else 1
+                  it = match_item(mm.group(2) if mm else p)
+                  if it:
+                      for _ in range(mult):
+                          if len(out) < 8:
+                              out.append(it)
+              return out
+
+          seen_msgs = set()
+          did_initial_backfill = False
+          def poll_vr():
+              global did_initial_backfill
+              chan = os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip() or "535250426061258753"
+              tok = os.environ.get("DISCORD_SCANNER_TOKEN", "").strip()
+              if not chan or not tok:
+                  return
+              batches = 12 if not did_initial_backfill else 1
+              did_initial_backfill = True
+              before_id = None
+              all_msgs = []
+              for _ in range(batches):
+                  u = f"https://discord.com/api/v10/channels/{chan}/messages?limit=100" + (f"&before={before_id}" if before_id else "")
+                  page_msgs = get_json(u, hdrs={"Authorization": tok, "User-Agent": "Mozilla/5.0"})
+                  if not isinstance(page_msgs, list) or not page_msgs:
+                      break
+                  all_msgs.extend(page_msgs)
+                  before_id = str(page_msgs[-1].get("id", ""))
+                  if batches > 1:
+                      time.sleep(0.4)
+              msgs = all_msgs
+              if not msgs:
+                  return
+              num_pat = r"(\d{1,3}(?:[,\s]\d{3})+|\d+(?:\.\d+)?\s*[km]?)"
+              v_re = re.compile(rf"(?i)^(?:values?|vals?|v)?\s*:?\s*{num_pat}\s*(?:vs\.?|v\.?|/|-)\s*{num_pat}(?:\s*\(([^)]*)\))?")
+              for msg in reversed(msgs):
+                  mid = str(msg.get("id", ""))
+                  if not mid or mid in seen_msgs:
+                      continue
+                  seen_msgs.add(mid)
+                  lines = [ln.strip() for ln in str(msg.get("content") or "").splitlines() if ln.strip()]
+                  s_u, r_u, va, vb, op_d, ilines = "Sender", "Receiver", None, None, None, []
+                  for ln in lines:
+                      ms = re.match(r"(?i)^(?:sender|sent|s)\s*[:=-]\s*@?([^\s(]+)", ln)
+                      if ms: s_u = ms.group(1); continue
+                      mr = re.match(r"(?i)^(?:receiver|rec|r)\s*[:=-]\s*@?([^\s(]+)", ln)
+                      if mr: r_u = mr.group(1); continue
+                      if re.match(r"(?i)^(?:date|d)\s*[:=-]", ln): continue
+                      vm = v_re.search(ln)
+                      if vm:
+                          va, vb = parse_val(vm.group(1)), parse_val(vm.group(2))
+                          if vm.group(3):
+                              mop = re.search(rf"{num_pat}\s*(?:[a-zA-Z0-9_']+\s+)?(?:op|overpay|lb|lowball)", vm.group(3), re.I)
+                              if mop: op_d = parse_val(mop.group(1))
+                          continue
+                      ilines.append(ln)
+                  f_str = " ".join(ilines)
+                  v_sp = re.split(r"\s+(?:vs\.?|v\.?|//)\s+", f_str, maxsplit=1, flags=re.I)
+                  ia, ib = [], []
+                  if len(v_sp) == 2:
+                      ia, ib = extract_seg(v_sp[0]), extract_seg(v_sp[1])
+                  else:
+                      sp = [p.strip() for p in re.split(r"(?<!\d)/(?!\d)", f_str) if p.strip()]
+                      if len(sp) == 2:
+                          ia, ib = extract_seg(sp[0]), extract_seg(sp[1])
+                      elif len(sp) > 2:
+                          all_it = []
+                          for s_p in sp: all_it.extend(extract_seg(s_p))
+                          if len(all_it) >= 2:
+                              ia, ib = (all_it[1:], [all_it[0]]) if (va and vb and abs(all_it[0]["value"] - vb) < abs(all_it[0]["value"] - va)) else ([all_it[0]], all_it[1:])
+                  if not ia or not ib:
+                      continue
+                  now = int(time.time())
+                  fva = va if va else sum(x["value"] for x in ia)
+                  fvb = vb if vb else sum(x["value"] for x in ib)
+                  fra = sum(x["rap"] for x in ia) or fva
+                  frb = sum(x["rap"] for x in ib) or fvb
+                  fop = op_d if op_d is not None else abs(fva - fvb)
+                  dup = conn.execute("SELECT 1 FROM trades WHERE user_a_name=? AND user_b_name=? AND value_a=? AND value_b=? AND ABS(detected_at-?)<=86400", (s_u, r_u, fva, fvb, now)).fetchone()
+                  if not dup:
+                      tt = "UPGRADE" if len(ia) > len(ib) else ("DOWNGRADE" if len(ib) > len(ia) else "SWAP")
+                      cur = conn.execute("INSERT INTO trades (user_a_id,user_a_name,user_b_id,user_b_name,items_a_json,items_b_json,value_a,rap_a,value_b,rap_b,op_value,op_rap,trade_type,detected_at) VALUES (888002,?,888003,?,?,?,?,?,?,?,?,?,?,?)",
+                          (s_u, r_u, json.dumps(ia), json.dumps(ib), fva, fra, fvb, frb, fop, abs(fra-frb), tt, now))
+                      tid = cur.lastrowid
+                      for x in ia: conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'A', 0, ?,?,?,?, 0, ?)", (tid, x["item_id"], x["value"], x["rap"], fvb, fva, now))
+                      for x in ib: conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'B', 0, ?,?,?,?, 0, ?)", (tid, x["item_id"], x["value"], x["rap"], fva, fvb, now))
+                      conn.commit()
+
+          refresh_items()
+          seed_ads()
+          poll_vr()
+
+          last_ads = time.time()
+          last_items = time.time()
+          last_vr = time.time()
+          last_push = time.time()
+          priority_q = []
+
+          while (time.time() - START_TS) < MAX_SECONDS:
+              now_f = time.time()
+              now = int(now_f)
+              if now_f - last_items >= 300:
+                  refresh_items()
+                  last_items = now_f
+              if now_f - last_ads >= 20:
+                  seed_ads()
+                  last_ads = now_f
+              if now_f - last_vr >= 20:
+                  poll_vr()
+                  last_vr = now_f
+              if now_f - last_push >= 300:
+                  git_checkpoint()
+                  last_push = now_f
+
+              if priority_q:
+                  uid = priority_q.pop(0)
+              else:
+                  r = conn.execute("SELECT user_id FROM traders ORDER BY CASE WHEN last_ad_at >= ? AND last_scanned_at <= ? THEN 0 ELSE 1 END ASC, last_scanned_at ASC, last_ad_at DESC LIMIT 1", (now - 3600, now - 40)).fetchone()
+                  if not r:
+                      time.sleep(0.5)
+                      continue
+                  uid = int(r["user_id"])
+
+              inv_data = get_json(f"https://inventory.roblox.com/v1/users/{uid}/assets/collectibles?limit=100&sortOrder=Asc")
+              if inv_data and "data" in inv_data:
+                  prev_owned = {int(x["uaid"]): int(x["item_id"]) for x in conn.execute("SELECT uaid, item_id FROM owners WHERE user_id=?", (uid,)).fetchall()}
+                  cur_uaids = set()
+                  for entry in inv_data["data"]:
+                      uaid, iid = entry.get("userAssetId"), entry.get("assetId")
+                      if not uaid or not iid:
+                          continue
+                      uaid, iid = int(uaid), int(iid)
+                      cur_uaids.add(uaid)
+                      prev = conn.execute("SELECT user_id FROM owners WHERE uaid=?", (uaid,)).fetchone()
+                      if prev and int(prev["user_id"]) != uid:
+                          from_u = int(prev["user_id"])
+                          conn.execute("INSERT INTO uaid_moves (uaid,item_id,from_user_id,to_user_id,detected_at) VALUES (?,?,?,?,?)", (uaid, iid, from_u, uid, now))
+                          conn.execute("INSERT INTO traders (user_id,username,last_ad_at,last_scanned_at,scan_count) VALUES (?,'',?,0,0) ON CONFLICT(user_id) DO UPDATE SET last_ad_at=MAX(traders.last_ad_at,?)", (from_u, now, now))
+                          if from_u not in priority_q:
+                              priority_q.insert(0, from_u)
+                      conn.execute("INSERT OR REPLACE INTO owners (uaid,item_id,user_id,seen_at) VALUES (?,?,?,?)", (uaid, iid, uid, now))
+                  departed = [u for u in prev_owned if u not in cur_uaids]
+                  if departed:
+                      cps = [int(x["cp"]) for x in conn.execute("SELECT DISTINCT from_user_id AS cp FROM uaid_moves WHERE to_user_id=? AND detected_at>=? AND matched_trade_id IS NULL UNION SELECT DISTINCT to_user_id AS cp FROM uaid_moves WHERE from_user_id=? AND detected_at>=? AND matched_trade_id IS NULL", (uid, now-600, uid, now-600)).fetchall() if int(x["cp"]) != uid]
+                      if len(cps) == 1:
+                          tcp = cps[0]
+                          for du in departed[:4]:
+                              conn.execute("INSERT INTO uaid_moves (uaid,item_id,from_user_id,to_user_id,detected_at) VALUES (?,?,?,?,?)", (du, prev_owned[du], uid, tcp, now))
+                              conn.execute("UPDATE owners SET user_id=?, seen_at=? WHERE uaid=?", (tcp, now, du))
+              conn.execute("UPDATE traders SET last_scanned_at=?, scan_count=scan_count+1 WHERE user_id=?", (now, uid))
               conn.commit()
 
-          d_ads = get_json("https://api.rolimons.com/tradeads/v1/getrecentads")
-          if d_ads and d_ads.get("success"):
-              for ad in d_ads.get("trade_ads", []):
-                  conn.execute("""
-                      INSERT INTO traders (user_id, username, last_ad_at, last_scanned_at, scan_count)
-                      VALUES (?, ?, ?, 0, 0)
-                      ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, last_ad_at=MAX(traders.last_ad_at, excluded.last_ad_at)
-                  """, (int(ad[2]), str(ad[3]), int(ad[1])))
-              conn.commit()
+              unmatched = conn.execute("SELECT * FROM uaid_moves WHERE matched_trade_id IS NULL AND detected_at >= ?", (now - 86400,)).fetchall()
+              pairs = defaultdict(list)
+              for m in unmatched:
+                  if m["from_user_id"] != m["to_user_id"]:
+                      pairs[(int(m["from_user_id"]), int(m["to_user_id"]))].append(dict(m))
+              seen_p = set()
+              for (ua, ub), m_ab in list(pairs.items()):
+                  pk = (min(ua, ub), max(ua, ub))
+                  if pk in seen_p or not pairs.get((ub, ua)):
+                      continue
+                  seen_p.add(pk)
+                  m_ba = pairs[(ub, ua)]
+                  ia = [{"item_id": x["item_id"], "uaid": x["uaid"], "name": items_map.get(x["item_id"], {}).get("name", f"Item #{x['item_id']}"), "acronym": items_map.get(x["item_id"], {}).get("acronym", ""), "value": items_map.get(x["item_id"], {}).get("value", 0), "rap": items_map.get(x["item_id"], {}).get("rap", 0)} for x in m_ab[:4] if int(x["item_id"]) > 0]
+                  ib = [{"item_id": x["item_id"], "uaid": x["uaid"], "name": items_map.get(x["item_id"], {}).get("name", f"Item #{x['item_id']}"), "acronym": items_map.get(x["item_id"], {}).get("acronym", ""), "value": items_map.get(x["item_id"], {}).get("value", 0), "rap": items_map.get(x["item_id"], {}).get("rap", 0)} for x in m_ba[:4] if int(x["item_id"]) > 0]
+                  if not ia or not ib or ({x["item_id"] for x in ia} == {x["item_id"] for x in ib} and len(ia) == len(ib)):
+                      continue
+                  va, ra = sum(x["value"] for x in ia), sum(x["rap"] for x in ia)
+                  vb, rb = sum(x["value"] for x in ib), sum(x["rap"] for x in ib)
+                  na_r = conn.execute("SELECT username FROM traders WHERE user_id=?", (ua,)).fetchone()
+                  nb_r = conn.execute("SELECT username FROM traders WHERE user_id=?", (ub,)).fetchone()
+                  na = na_r["username"] if na_r and na_r["username"] else (get_json(f"https://users.roblox.com/v1/users/{ua}") or {}).get("name", f"User_{ua}")
+                  nb = nb_r["username"] if nb_r and nb_r["username"] else (get_json(f"https://users.roblox.com/v1/users/{ub}") or {}).get("name", f"User_{ub}")
+                  tt = "UPGRADE" if len(ia) > len(ib) else ("DOWNGRADE" if len(ib) > len(ia) else "SWAP")
+                  cur = conn.execute("INSERT INTO trades (user_a_id,user_a_name,user_b_id,user_b_name,items_a_json,items_b_json,value_a,rap_a,value_b,rap_b,op_value,op_rap,trade_type,detected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      (ua, na, ub, nb, json.dumps(ia), json.dumps(ib), va, ra, vb, rb, abs(va-vb), abs(ra-rb), tt, now))
+                  tid = cur.lastrowid
+                  for x in ia: conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'A', ?, ?,?,?,?, 0, ?)", (tid, x["item_id"], x["uaid"], x["value"], x["rap"], vb, va, now))
+                  for x in ib: conn.execute("INSERT OR REPLACE INTO trade_items VALUES (?,?, 'B', ?, ?,?,?,?, 0, ?)", (tid, x["item_id"], x["uaid"], x["value"], x["rap"], va, vb, now))
+                  mids = [x["id"] for x in m_ab + m_ba]
+                  conn.execute(f"UPDATE uaid_moves SET matched_trade_id=? WHERE id IN ({','.join('?' for _ in mids)})", [tid, *mids])
+                  conn.commit()
+              time.sleep(0.25)
 
-          batch_size = int(os.environ.get("SCAN_BATCH_SIZE", "120"))
-          traders = conn.execute("SELECT user_id, username FROM traders ORDER BY last_scanned_at ASC, last_ad_at DESC LIMIT ?", (batch_size,)).fetchall()
-          moves_count = 0
-          for idx, tr in enumerate(traders):
-              uid = int(tr["user_id"])
-              ts = int(time.time())
-              pa = get_json(f"https://api.rolimons.com/players/v1/playerassets/{uid}")
-              inv = {}
-              if pa and pa.get("success") and pa.get("playerAssets"):
-                  for iid_s, uaids in pa["playerAssets"].items():
-                      for u in uaids:
-                          inv[int(u)] = int(iid_s)
-              if inv:
-                  ph = ",".join("?" for _ in inv)
-                  prevs = {r["uaid"]: r for r in conn.execute(f"SELECT uaid, user_id FROM owners WHERE uaid IN ({ph})", list(inv.keys())).fetchall()}
-                  for uaid, iid in inv.items():
-                      if uaid in prevs and prevs[uaid]["user_id"] != uid:
-                          conn.execute("INSERT INTO uaid_moves (uaid,item_id,from_user_id,to_user_id,detected_at) VALUES (?,?,?,?,?)", (uaid, iid, prevs[uaid]["user_id"], uid, ts))
-                          moves_count += 1
-                  conn.executemany("INSERT OR REPLACE INTO owners (uaid,item_id,user_id,seen_at) VALUES (?,?,?,?)", [(u, i, uid, ts) for u, i in inv.items()])
-              conn.execute("UPDATE traders SET last_scanned_at=?, scan_count=scan_count+1 WHERE user_id=?", (ts, uid))
-              conn.commit()
-              time.sleep(0.6)
-
-          # Match counter-moves into trades
-          unmatched = conn.execute("SELECT * FROM uaid_moves WHERE matched_trade_id IS NULL").fetchall()
-          by_pair = defaultdict(list)
-          for m in unmatched:
-              by_pair[(m["from_user_id"], m["to_user_id"])].append(dict(m))
-          visited = set()
-          for (ua, ub), m_ab in list(by_pair.items()):
-              pk = (min(ua, ub), max(ua, ub))
-              if pk in visited or not by_pair.get((ub, ua)):
-                  continue
-              visited.add(pk)
-              m_ba = by_pair[(ub, ua)][:4]
-              m_ab = m_ab[:4]
-              ia = [{"item_id": x["item_id"], "uaid": x["uaid"], "name": items_map.get(x["item_id"], {}).get("name", f"Item #{x['item_id']}"), "value": items_map.get(x["item_id"], {}).get("value", 0), "rap": items_map.get(x["item_id"], {}).get("rap", 0)} for x in m_ab]
-              ib = [{"item_id": x["item_id"], "uaid": x["uaid"], "name": items_map.get(x["item_id"], {}).get("name", f"Item #{x['item_id']}"), "value": items_map.get(x["item_id"], {}).get("value", 0), "rap": items_map.get(x["item_id"], {}).get("rap", 0)} for x in m_ba]
-              va, ra = sum(x["value"] for x in ia), sum(x["rap"] for x in ia)
-              vb, rb = sum(x["value"] for x in ib), sum(x["rap"] for x in ib)
-              cur = conn.execute("INSERT INTO trades (user_a_id,user_a_name,user_b_id,user_b_name,items_a_json,items_b_json,value_a,rap_a,value_b,rap_b,op_value,op_rap,trade_type,detected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  (ua, f"User_{ua}", ub, f"User_{ub}", json.dumps(ia), json.dumps(ib), va, ra, vb, rb, abs(va-vb), abs(ra-rb), "SWAP", now))
-              tid = cur.lastrowid
-              mids = [x["id"] for x in m_ab + m_ba]
-              conn.execute(f"UPDATE uaid_moves SET matched_trade_id=? WHERE id IN ({','.join('?' for _ in mids)})", [tid, *mids])
-              conn.commit()
-
-          print("Items:", conn.execute("SELECT COUNT(*) FROM items").fetchone()[0])
-          print("Traders:", conn.execute("SELECT COUNT(*) FROM traders").fetchone()[0], "Scanned:", conn.execute("SELECT COUNT(*) FROM traders WHERE scan_count>0").fetchone()[0])
-          print("UAIDs:", conn.execute("SELECT COUNT(*) FROM owners").fetchone()[0], "Moves:", moves_count, "Proofs:", conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0])
+          git_checkpoint()
           EOF
 
       - name: Save Updated Database Back to Repo
+        if: always()
         run: |
           git config user.name "void-scanner-bot"
           git config user.email "void-scanner-bot@users.noreply.github.com"
           find . -name "void_data.sqlite3" -exec git add -f {} +
-          git diff --staged --quiet || (git commit -m "Update proofs & UAID database [skip ci]" && git pull --rebase && git push)
+          git diff --staged --quiet || (git commit -m "Update proofs & UAID database" && git pull --rebase -X ours && git push)
+
+      - name: Immediately Trigger Next 5.5-Hour Run (Zero Delay)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run main.yml --ref main || true
