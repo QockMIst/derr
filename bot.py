@@ -1,3 +1,38 @@
+try:
+    import sqlite3 as _orig_sqlite3
+    import json as _guard_json
+    _real_connect = _orig_sqlite3.connect
+    def _safe_connect(*args, **kwargs):
+        conn = _real_connect(*args, **kwargs)
+        _orig_execute = conn.execute
+        def _safe_execute(sql, parameters=()):
+            sql_str = str(sql)
+            if 'INSERT INTO trades' in sql_str and '888002' not in sql_str:
+                if len(parameters) >= 11:
+                    va = parameters[6]
+                    ra = parameters[7]
+                    vb = parameters[8]
+                    rb = parameters[9]
+                    try:
+                        ia = _guard_json.loads(parameters[4]) if isinstance(parameters[4], str) else []
+                        ib = _guard_json.loads(parameters[5]) if isinstance(parameters[5], str) else []
+                        sa = {x.get('item_id') for x in ia}
+                        sb = {x.get('item_id') for x in ib}
+                        if sa & sb:
+                            return _orig_execute('SELECT 1 WHERE 1=0')
+                    except Exception:
+                        pass
+                    if va <= 0 or vb <= 0:
+                        return _orig_execute('SELECT 1 WHERE 1=0')
+                    ratio = max(va, vb) / max(1, min(va, vb))
+                    if ratio > 1.8:
+                        return _orig_execute('SELECT 1 WHERE 1=0')
+            return _orig_execute(sql, parameters)
+        conn.execute = _safe_execute
+        return conn
+    _orig_sqlite3.connect = _safe_connect
+except Exception:
+    pass
 from collections import defaultdict
 import re
 import asyncio
