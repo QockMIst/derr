@@ -941,7 +941,7 @@ async def cmd_user(interaction: discord.Interaction, user: str) -> None:
     tot_rap = sum(int(x.get("rap", 0)) for x in owned_items)
 
     await asyncio.to_thread(poll_rolimons_ads_once)
-    ads_count = sum(1 for a in RECENT_RAW_ADS if int(a[2]) == uid)
+    ads_count = sum(1 for a in RECENT_RAW_ADS if int(a.get("user_id", a.get("player_id", 0)) if isinstance(a, dict) else a[2]) == uid)
 
     top5_lines = []
     for it in owned_items[:5]:
@@ -1200,11 +1200,13 @@ async def cmd_matchingowners(interaction: discord.Interaction, query: str) -> No
 
     for uid in matched_uids[:5]:
         uname = resolved_names.get(uid) or f"User_{uid}"
-        user_ads = [a for a in RECENT_RAW_ADS if int(a[2]) == uid][:3]
+        user_ads = [a for a in RECENT_RAW_ADS if int(a.get("user_id", a.get("player_id", 0)) if isinstance(a, dict) else a[2]) == uid][:3]
         ad_lines = []
         for ad in user_ads:
-            sends = [ITEMS_CATALOG[x]["name"] for x in ad[4].get("items", []) if x in ITEMS_CATALOG]
-            wants = [ITEMS_CATALOG[x]["name"] for x in ad[5].get("items", []) if x in ITEMS_CATALOG]
+            s_items = ad.get("offer_items", []) if isinstance(ad, dict) else ad[4].get("items", [])
+            sends = [ITEMS_CATALOG[x]["name"] for x in s_items if x in ITEMS_CATALOG]
+            w_items = ad.get("request_items", []) if isinstance(ad, dict) else ad[5].get("items", [])
+            wants = [ITEMS_CATALOG[x]["name"] for x in w_items if x in ITEMS_CATALOG]
             ad_lines.append(f"• Sends `{', '.join(sends) or 'Any'}` ⇄ Wants `{', '.join(wants) or 'Any'}`")
 
         ad_text = "\n".join(ad_lines) if ad_lines else "*No active trade ads posted recently.*"
