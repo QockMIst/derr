@@ -587,8 +587,9 @@ def main() -> None:
                 (step_now, uid),
             )
 
-        if moves_count > 0:
-            trades_created += match_pending(conn, items_catalog, step_now)
+        # UAID trade matching temporarily bypassed while tuning atomic diffs
+        # trades_created += match_pending(conn, items_catalog, step_now)
+        pass
 
         time.sleep(0.35)
 
