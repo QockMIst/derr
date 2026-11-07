@@ -83,11 +83,11 @@ jobs:
                               cfg_chan_id = str(d_cfg.get("value_requests_channel_id", "")).strip()
                       except Exception:
                           pass
-                  bot_tok = os.environ.get("DISCORD_BOT_TOKEN", "").strip() or cfg_bot_tok or "MTU2ODQyNzIxODUxMjY1MDQ0MQ.G71zcY.jETPRdIc2VU5ODwkGxXHuFbAynuTyAVeXsAGfw"
+                  bot_tok = os.environ.get("DISCORD_BOT_TOKEN", "").strip() or cfg_bot_tok
                   if not os.environ.get("DISCORD_SCANNER_TOKEN", "").strip():
-                      os.environ["DISCORD_SCANNER_TOKEN"] = cfg_scan_tok or "MTEwNTg1MDM0ODA2NjgzNjU3Mg.Gf8vXb.QDrvuh1MhjSM793anCEmPiLLDT50RoeEOkpg1Q"
+                      os.environ["DISCORD_SCANNER_TOKEN"] = cfg_scan_tok
                   if not os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip():
-                      os.environ["VALUE_REQUESTS_CHANNEL_ID"] = cfg_chan_id or "535250426061258753"
+                      os.environ["VALUE_REQUESTS_CHANNEL_ID"] = cfg_chan_id
                   if bot_tok:
                       def _run_bot():
                           try:
@@ -100,8 +100,8 @@ jobs:
                       threading.Thread(target=_run_bot, daemon=True).start()
                   break
           if not bot_started:
-              os.environ["DISCORD_SCANNER_TOKEN"] = os.environ.get("DISCORD_SCANNER_TOKEN", "").strip() or "MTEwNTg1MDM0ODA2NjgzNjU3Mg.Gf8vXb.QDrvuh1MhjSM793anCEmPiLLDT50RoeEOkpg1Q"
-              os.environ["VALUE_REQUESTS_CHANNEL_ID"] = os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip() or "535250426061258753"
+              os.environ["DISCORD_SCANNER_TOKEN"] = os.environ.get("DISCORD_SCANNER_TOKEN", "").strip()
+              os.environ["VALUE_REQUESTS_CHANNEL_ID"] = os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip()
 
           def git_checkpoint():
               try:

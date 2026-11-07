@@ -1,18 +1,22 @@
+import asyncio
+import base64
 import os
+import sqlite3
+import tempfile
 import threading
 import time
 import tomllib
-import webbrowser
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import uvicorn
-from fastapi import FastAPI, Query, Response
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from calibrate import seed_reference_calibration_data
 from data.catalog import RobloxCatalogClient
 from data.roblox import RobloxClient
 from data.rolimons import RolimonsClient
@@ -29,7 +33,6 @@ from tracker.seed import seed_traders_from_ads
 
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.toml"
-DB_PATH = BASE_DIR / "void_data.sqlite3"
 
 
 def load_config() -> Dict[str, Any]:
@@ -39,416 +42,630 @@ def load_config() -> Dict[str, Any]:
     return {}
 
 
-def sync_db_from_github_if_configured() -> bool:
-    """
-    If `GITHUB_DB_RAW_URL` (e.g. https://raw.githubusercontent.com/<user>/<repo>/main/void_data.sqlite3)
-    is set in config.toml or environment, downloads the latest cloud-scanned SQLite database
-    if it has more proofs/UAIDs than the local file.
-    """
-    raw_url = os.environ.get(
-        "GITHUB_DB_RAW_URL",
-        str(cfg.get("tracker", {}).get("github_db_raw_url", "")).strip(),
-    )
-    if not raw_url:
-        return False
-    try:
-        import urllib.request
-
-        req = urllib.request.Request(raw_url, headers={"User-Agent": "VoidLocal/2.0"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = resp.read()
-        if len(data) > 4096 and data.startswith(b"SQLite format 3"):
-            tmp_path = BASE_DIR / "void_cloud_tmp.sqlite3"
-            tmp_path.write_bytes(data)
-            cloud_db = Database(tmp_path)
-            cloud_stats = cloud_db.get_stats()
-            local_stats = db.get_stats() if DB_PATH.exists() else {"proofs": -1, "tracked_uaids": -1}
-            if (
-                cloud_stats["proofs"] > local_stats["proofs"]
-                or cloud_stats["tracked_uaids"] > local_stats["tracked_uaids"]
-            ):
-                DB_PATH.write_bytes(data)
-                tmp_path.unlink(missing_ok=True)
-                return True
-            tmp_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-    return False
-
-
-cfg = load_config()
-hf_sync = HuggingFacePersistence(DB_PATH)
-hf_sync.restore_if_available()
-
-db = Database(DB_PATH)
-sync_db_from_github_if_configured()
+CONFIG = load_config()
+db = Database(BASE_DIR / "void_data.sqlite3")
+hf_sync = HuggingFacePersistence(BASE_DIR / "void_data.sqlite3", interval_seconds=600)
 rolimons = RolimonsClient(cache_ttl=300)
 roblox = RobloxClient(backoff_seconds=5.0)
 catalog_client = RobloxCatalogClient()
 sales_client = SalesClient()
 
+sniper_cfg = CONFIG.get("sniper", {})
 sniper = AdSniper(
-    min_deal_percent=float(cfg.get("sniper", {}).get("min_deal_percent", 5.0)),
-    cooldown_seconds=int(cfg.get("sniper", {}).get("cooldown_seconds", 1800)),
-    filter_projecteds=bool(cfg.get("sniper", {}).get("filter_projecteds", True)),
-    filter_tag_only_requests=bool(cfg.get("sniper", {}).get("filter_tag_only_requests", True)),
+    min_deal_percent=float(sniper_cfg.get("min_deal_percent", 5.0)),
+    cooldown_seconds=int(sniper_cfg.get("cooldown_seconds", 1800)),
+    filter_projecteds=bool(sniper_cfg.get("filter_projecteds", True)),
+    filter_tag_only_requests=bool(sniper_cfg.get("filter_tag_only_requests", True)),
 )
+
+tracker_cfg = CONFIG.get("tracker", {})
 scanner = InventoryScanner(
     db=db,
     rolimons=rolimons,
     roblox=roblox,
-    match_window_seconds=int(cfg.get("tracker", {}).get("match_window_seconds", 7200)),
-)
-engine = TradeEngine(
-    db=db,
-    sales_client=sales_client,
-    risk_edge_1v1_rate=float(cfg.get("engine", {}).get("risk_edge_1v1_rate", 0.05)),
+    match_window_seconds=int(tracker_cfg.get("match_window_seconds", 7200)),
 )
 
-ITEMS_CATALOG: Dict[int, Dict[str, Any]] = {}
-RECENT_ADS_CACHE: List[Dict[str, Any]] = []
+engine_cfg = CONFIG.get("engine", {})
+trade_engine = TradeEngine(
+    db=db,
+    sales_client=sales_client,
+    risk_edge_1v1_rate=float(engine_cfg.get("risk_edge_1v1_rate", 0.05)),
+)
+
+ITEMS_CATALOG: Dict[int, Dict[str, Any]] = db.get_all_items()
+RECENT_RAW_ADS: List[Dict[str, Any]] = []
 SNIPED_DEALS: List[Dict[str, Any]] = []
+SCANNER_STATUS: Dict[str, Any] = {
+    "running": False,
+    "last_scanned_user": None,
+    "total_scans": 0,
+    "moves_detected": 0,
+    "trades_matched": 0,
+    "catalog_crawl_done": False,
+    "github_synced_at": 0,
+}
 _STOP_EVENT = threading.Event()
 
 
-def ensure_thumbnails(item_ids: List[int]) -> None:
-    missing = [
-        iid
-        for iid in item_ids
-        if iid in ITEMS_CATALOG and not ITEMS_CATALOG[iid].get("thumbnail_url")
-    ]
-    if not missing:
-        return
-    thumbs = roblox.fetch_thumbnails(missing)
-    if thumbs:
-        for iid, url in thumbs.items():
-            if iid in ITEMS_CATALOG:
-                ITEMS_CATALOG[iid]["thumbnail_url"] = url
-        db.update_thumbnails(thumbs)
-
-
-def refresh_market_and_ads() -> int:
-    global ITEMS_CATALOG, RECENT_ADS_CACHE
-    fetched = rolimons.fetch_items()
-    if fetched:
-        for iid, meta in fetched.items():
-            meta["source"] = "rolimons"
-            old = ITEMS_CATALOG.get(iid)
-            if old:
-                if old.get("thumbnail_url"):
-                    meta["thumbnail_url"] = old["thumbnail_url"]
-                if old.get("manual_value") is not None:
-                    meta["manual_value"] = old["manual_value"]
-                    meta["value"] = int(old["manual_value"])
-        db.upsert_items(fetched)
-        ITEMS_CATALOG = db.get_all_items()
-
-    ads = rolimons.fetch_recent_ads()
-    if ads:
-        RECENT_ADS_CACHE = ads
-        seed_traders_from_ads(db, ads)
-
-    sale_acts = rolimons.fetch_sale_activity()
-    if sale_acts:
-        db.record_live_sales(sale_acts)
-
-    new_hits = 0
-    for ad in ads:
-        deal = sniper.evaluate_ad(ad, ITEMS_CATALOG)
-        if deal:
-            all_ids = [x["item_id"] for x in deal["offer_items"] + deal["request_items"]]
-            ensure_thumbnails(all_ids)
-            SNIPED_DEALS.insert(0, deal)
-            new_hits += 1
-
-    del SNIPED_DEALS[200:]
-    return new_hits
-
-
-def _save_discovered_roblox_items(batch: List[Dict[str, Any]]) -> None:
-    if not batch:
-        return
-    batch_map = {it["item_id"]: it for it in batch}
-    db.upsert_items(batch_map)
-    thumbs = roblox.fetch_thumbnails(list(batch_map.keys()))
-    if thumbs:
-        db.update_thumbnails(thumbs)
-    for iid, it in batch_map.items():
-        if thumbs and iid in thumbs:
-            it["thumbnail_url"] = thumbs[iid]
-        ITEMS_CATALOG[iid] = it
-
-
-def _catalog_crawler_worker() -> None:
-    """
-    Crawls Roblox Catalog v2 (CreatorTargetId=1, SalesTypeFilter=2) in the background
-    so every Roblox-made limited/collectible (including Oozing Oscar, etc.) is indexed
-    into the local database without any UGC items.
-    """
+def refresh_items_catalog(force: bool = False) -> Dict[int, Dict[str, Any]]:
+    global ITEMS_CATALOG
     try:
-        catalog_client.crawl_all_roblox_limiteds(
-            existing_catalog=ITEMS_CATALOG,
-            on_batch_callback=_save_discovered_roblox_items,
-            max_pages=80,
-            page_delay=1.8,
-        )
+        fresh = rolimons.fetch_items(force=force)
+        if fresh:
+            db.upsert_items(fresh)
+    except Exception:
+        pass
+    latest = db.get_all_items()
+    ITEMS_CATALOG.clear()
+    ITEMS_CATALOG.update(latest)
+    return ITEMS_CATALOG
+
+
+def poll_rolimons_ads_once() -> int:
+    global RECENT_RAW_ADS, SNIPED_DEALS
+    try:
+        ads = rolimons.fetch_recent_ads()
+    except Exception:
+        return 0
+    if not ads:
+        return 0
+
+    RECENT_RAW_ADS.clear()
+    RECENT_RAW_ADS.extend(ads)
+    seed_traders_from_ads(db, ads)
+
+    try:
+        sale_acts = rolimons.fetch_sale_activity()
+        if sale_acts:
+            db.record_live_sales(sale_acts)
     except Exception:
         pass
 
+    new_deals = []
+    for ad in ads:
+        deal = sniper.evaluate_ad(ad, ITEMS_CATALOG)
+        if deal:
+            new_deals.append(deal)
 
-def _background_worker() -> None:
+    if new_deals:
+        all_ids = []
+        for d in new_deals:
+            all_ids.extend(x["item_id"] for x in d["offer_items"])
+            all_ids.extend(x["item_id"] for x in d["request_items"])
+        thumbs = roblox.fetch_thumbnails(all_ids)
+        if thumbs:
+            db.update_thumbnails(thumbs)
+            for iid, url in thumbs.items():
+                if iid in ITEMS_CATALOG:
+                    ITEMS_CATALOG[iid]["thumbnail_url"] = url
+            for d in new_deals:
+                for x in d["offer_items"] + d["request_items"]:
+                    if x["item_id"] in thumbs:
+                        x["thumbnail_url"] = thumbs[x["item_id"]]
+
+        existing_ids = {d["ad_id"] for d in SNIPED_DEALS}
+        for d in reversed(new_deals):
+            if d["ad_id"] not in existing_ids:
+                SNIPED_DEALS.insert(0, d)
+        del SNIPED_DEALS[120:]
+
+    return len(new_deals)
+
+
+def sync_db_from_github_if_configured() -> int:
+    url = str(tracker_cfg.get("github_db_raw_url", "")).strip()
+    token = str(tracker_cfg.get("github_token", "")).strip()
+    if not url or not url.startswith("http"):
+        return 0
+
+    sep = "&" if "?" in url else "?"
+    bust_url = f"{url}{sep}_t={int(time.time())}"
+    tmp_path: Optional[Path] = None
+    merged_count = 0
+    try:
+        headers = {"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"}
+        if token:
+            headers["Authorization"] = f"token {token}"
+            if "raw.githubusercontent.com" in url:
+                headers["Accept"] = "application/vnd.github.v3.raw"
+        req = urllib.request.Request(bust_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw_bytes = resp.read()
+        if len(raw_bytes) < 4096 or not raw_bytes.startswith(b"SQLite format 3"):
+            return 0
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite3") as tmp:
+            tmp.write(raw_bytes)
+            tmp_path = Path(tmp.name)
+
+        remote_conn = sqlite3.connect(str(tmp_path))
+        remote_conn.row_factory = sqlite3.Row
+        try:
+            remote_trades = remote_conn.execute(
+                "SELECT * FROM trades ORDER BY detected_at ASC"
+            ).fetchall()
+        except Exception:
+            remote_trades = []
+        try:
+            remote_moves = remote_conn.execute(
+                "SELECT * FROM uaid_moves ORDER BY detected_at ASC"
+            ).fetchall()
+        except Exception:
+            remote_moves = []
+        try:
+            remote_traders = remote_conn.execute(
+                "SELECT * FROM traders"
+            ).fetchall()
+        except Exception:
+            remote_traders = []
+        remote_conn.close()
+
+        if remote_traders:
+            for tr in remote_traders:
+                if tr["username"] and not str(tr["username"]).startswith("User_"):
+                    db.upsert_trader(int(tr["user_id"]), str(tr["username"]), int(tr["last_ad_at"]))
+
+        existing_sigs = set()
+        for t in db.get_recent_trades(limit=2000):
+            existing_sigs.add((int(t["user_a_id"]), int(t["user_b_id"]), int(t["detected_at"])))
+            existing_sigs.add((int(t["user_b_id"]), int(t["user_a_id"]), int(t["detected_at"])))
+
+        for rt in remote_trades:
+            ua_id = int(rt["user_a_id"])
+            ub_id = int(rt["user_b_id"])
+            det_at = int(rt["detected_at"])
+            if (ua_id, ub_id, det_at) in existing_sigs:
+                continue
+            import json as _json
+
+            items_a_list = _json.loads(rt["items_a_json"])
+            items_b_list = _json.loads(rt["items_b_json"])
+            if not items_a_list or not items_b_list:
+                continue
+            if any(int(x.get("item_id", 0)) <= 0 for x in items_a_list + items_b_list):
+                continue
+            uaids_a = {int(x.get("uaid", -1)) for x in items_a_list if x.get("uaid")}
+            uaids_b = {int(x.get("uaid", -2)) for x in items_b_list if x.get("uaid")}
+            if uaids_a & uaids_b:
+                continue
+            if {x.get("item_id") for x in items_a_list} == {x.get("item_id") for x in items_b_list} and len(items_a_list) == len(items_b_list):
+                continue
+
+            ua_name = str(rt["user_a_name"])
+            if not ua_name or ua_name.startswith("User_"):
+                ua_name = db.get_trader_name(ua_id)
+            ub_name = str(rt["user_b_name"])
+            if not ub_name or ub_name.startswith("User_"):
+                ub_name = db.get_trader_name(ub_id)
+
+            db.insert_trade(
+                user_a_id=ua_id,
+                user_a_name=ua_name,
+                user_b_id=ub_id,
+                user_b_name=ub_name,
+                items_a=items_a_list,
+                items_b=items_b_list,
+                value_a=int(rt["value_a"]),
+                rap_a=int(rt["rap_a"]),
+                value_b=int(rt["value_b"]),
+                rap_b=int(rt["rap_b"]),
+                op_value=int(rt["op_value"]),
+                op_rap=int(rt["op_rap"]),
+                trade_type=str(rt["trade_type"]),
+                detected_at=det_at,
+            )
+            existing_sigs.add((ua_id, ub_id, det_at))
+            existing_sigs.add((ub_id, ua_id, det_at))
+            merged_count += 1
+
+        if remote_moves:
+            with db._connect() as lconn:
+                existing_mv = {
+                    (int(r["uaid"]), int(r["from_user_id"]), int(r["to_user_id"]))
+                    for r in lconn.execute("SELECT uaid, from_user_id, to_user_id FROM uaid_moves").fetchall()
+                }
+                new_mvs = [
+                    (int(m["uaid"]), int(m["item_id"]), int(m["from_user_id"]), int(m["to_user_id"]), int(m["detected_at"]))
+                    for m in remote_moves
+                    if (int(m["uaid"]), int(m["from_user_id"]), int(m["to_user_id"])) not in existing_mv
+                ]
+                if new_mvs:
+                    lconn.executemany(
+                        "INSERT INTO uaid_moves (uaid, item_id, from_user_id, to_user_id, detected_at) VALUES (?, ?, ?, ?, ?)",
+                        new_mvs,
+                    )
+            from tracker.matcher import match_moves_into_trades
+            match_moves_into_trades(db, ITEMS_CATALOG, match_window_seconds=86400)
+
+        SCANNER_STATUS["github_synced_at"] = int(time.time())
+    except Exception:
+        pass
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+    return merged_count
+
+
+def _background_worker():
+    SCANNER_STATUS["running"] = True
     last_ad_poll = 0.0
-    poll_interval = float(cfg.get("sniper", {}).get("poll_interval_seconds", 20))
-    scan_interval = float(cfg.get("tracker", {}).get("scan_interval_seconds", 2.0))
+    last_item_poll = time.time()
+    last_gh_sync = 0.0
+    last_vr_poll = 0.0
+    seen_vr_msgs: set[str] = set()
+    ad_interval = float(sniper_cfg.get("poll_interval_seconds", 20))
+    scan_interval = float(tracker_cfg.get("scan_interval_seconds", 2.0))
+
+    def predict_op_callback(side_a_ids: List[int], side_b_ids: List[int]) -> Optional[int]:
+        res = trade_engine.analyze_trade(side_a_ids, side_b_ids, ITEMS_CATALOG, engine_mode="star")
+        return int(res.get("retrade_room", 0))
 
     while not _STOP_EVENT.is_set():
         now = time.time()
-        if now - last_ad_poll >= poll_interval:
-            try:
-                refresh_market_and_ads()
-            except Exception:
-                pass
+        if now - last_item_poll >= 300:
+            refresh_items_catalog(force=True)
+            last_item_poll = now
+
+        if now - last_ad_poll >= ad_interval:
+            poll_rolimons_ads_once()
             last_ad_poll = now
 
+        if now - last_gh_sync >= 45:
+            sync_db_from_github_if_configured()
+            last_gh_sync = now
+
+        if now - last_vr_poll >= 20:
+            last_vr_poll = now
+            try:
+                from value_requests import poll_discord_value_requests_channel
+                disc_cfg = CONFIG.get("discord", {})
+                vr_chan = os.environ.get("VALUE_REQUESTS_CHANNEL_ID", "").strip() or str(
+                    disc_cfg.get("value_requests_channel_id", "")
+                ).strip()
+                vr_tok = os.environ.get("DISCORD_SCANNER_TOKEN", "").strip() or str(
+                    disc_cfg.get("scanner_token", "")
+                ).strip()
+                if vr_chan and vr_tok:
+                    poll_discord_value_requests_channel(db, ITEMS_CATALOG, vr_chan, vr_tok, seen_vr_msgs)
+            except Exception:
+                pass
+
         try:
-            if ITEMS_CATALOG:
-                scanner.scan_one_step(ITEMS_CATALOG)
+            for _ in range(3):
+                step = scanner.scan_one_step(ITEMS_CATALOG, predict_op_fn=predict_op_callback)
+                if step["scanned_user"] is not None:
+                    SCANNER_STATUS["last_scanned_user"] = step["scanned_user"]
+                    SCANNER_STATUS["total_scans"] += 1
+                    SCANNER_STATUS["moves_detected"] += step["moves"]
+                    SCANNER_STATUS["trades_matched"] += len(step["new_trades"])
         except Exception:
             pass
 
         _STOP_EVENT.wait(scan_interval)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global ITEMS_CATALOG
-    ITEMS_CATALOG = db.get_all_items()
+def _background_catalog_crawler():
+    def _on_batch(new_items: List[Dict[str, Any]]) -> None:
+        batch_dict = {it["item_id"]: it for it in new_items}
+        db.upsert_items(batch_dict)
+        ITEMS_CATALOG.update(batch_dict)
+
     try:
-        refresh_market_and_ads()
+        catalog_client.crawl_all_roblox_limiteds(
+            existing_catalog=ITEMS_CATALOG,
+            on_batch_callback=_on_batch,
+            max_pages=80,
+            page_delay=1.8,
+        )
     except Exception:
         pass
+    SCANNER_STATUS["catalog_crawl_done"] = True
 
-    # Ensure Oozing Oscar (20011925) is immediately present even before full crawl finishes
-    if 20011925 not in ITEMS_CATALOG:
-        oscar_list = catalog_client.search_keyword("Oozing Oscar", ITEMS_CATALOG)
-        if oscar_list:
-            _save_discovered_roblox_items(oscar_list)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    hf_sync.restore_if_available()
+    refresh_items_catalog(force=True)
+    seed_reference_calibration_data(db, ITEMS_CATALOG)
+    sync_db_from_github_if_configured()
+    poll_rolimons_ads_once()
+
+    _STOP_EVENT.clear()
     worker = threading.Thread(target=_background_worker, daemon=True)
     worker.start()
 
-    crawler = threading.Thread(target=_catalog_crawler_worker, daemon=True)
+    crawler = threading.Thread(target=_background_catalog_crawler, daemon=True)
     crawler.start()
+
+    discord_token = os.environ.get("DISCORD_BOT_TOKEN", "").strip() or str(
+        CONFIG.get("discord", {}).get("bot_token", "")
+    ).strip()
+    bot_task = None
+    if discord_token:
+        try:
+            from bot import client as discord_client
+            bot_task = asyncio.create_task(discord_client.start(discord_token))
+        except Exception as exc:
+            print(f"[Carbon Discord App] Startup error: {exc}")
 
     hf_sync.start_periodic_backup(_STOP_EVENT)
     yield
     _STOP_EVENT.set()
+    if bot_task is not None:
+        try:
+            from bot import client as discord_client
+            await discord_client.close()
+        except Exception:
+            pass
+    hf_sync.backup_once()
 
 
-app = FastAPI(title="Void Local Market Suite", lifespan=lifespan)
+app = FastAPI(title="Carbon", lifespan=lifespan)
 
-fonts_path = BASE_DIR / "web" / "fonts"
-fonts_path.mkdir(parents=True, exist_ok=True)
-app.mount("/fonts", StaticFiles(directory=str(fonts_path)), name="fonts")
+WEB_DIR = BASE_DIR / "web"
+WEB_DIR.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 
 class TradeCheckRequest(BaseModel):
-    give_ids: List[int]
-    receive_ids: List[int]
-    engine: str = "v3.1"
+    give: List[Any] = []
+    receive: List[Any] = []
+    give_robux: int = 0
+    receive_robux: int = 0
+    engine: str = "v4"
 
 
 class ManualProofRequest(BaseModel):
-    side_a: str
-    side_b: str
+    user_a_name: str = "TraderA"
+    user_b_name: str = "TraderB"
+    items_a: List[Any]
+    items_b: List[Any]
 
 
-class SetItemValueRequest(BaseModel):
-    item_id: int
-    value: Optional[int] = None
-
-
-def resolve_or_discover_item(query: str) -> Optional[Dict[str, Any]]:
-    it = find_item_by_query(query, ITEMS_CATALOG)
-    if it:
-        ensure_thumbnails([it["item_id"]])
-        return ITEMS_CATALOG[it["item_id"]]
-    found = catalog_client.search_keyword(query, ITEMS_CATALOG)
-    if found:
-        _save_discovered_roblox_items(found)
-        return ITEMS_CATALOG[found[0]["item_id"]]
-    return None
+def _resolve_item_inputs(raw_list: List[Any]) -> List[int]:
+    resolved: List[int] = []
+    for entry in raw_list[:4]:
+        if isinstance(entry, int) or (isinstance(entry, str) and entry.strip().isdigit()):
+            iid = int(entry)
+            if iid not in ITEMS_CATALOG:
+                fetched = catalog_client.fetch_single_asset(iid)
+                if fetched:
+                    db.upsert_items({iid: fetched})
+                    ITEMS_CATALOG[iid] = fetched
+            if iid in ITEMS_CATALOG:
+                resolved.append(iid)
+                continue
+        item = find_item_by_query(str(entry), ITEMS_CATALOG)
+        if not item:
+            live_matches = catalog_client.search_keyword(str(entry), ITEMS_CATALOG)
+            if live_matches:
+                new_map = {x["item_id"]: x for x in live_matches}
+                db.upsert_items(new_map)
+                ITEMS_CATALOG.update(new_map)
+                item = live_matches[0]
+        if item:
+            resolved.append(int(item["item_id"]))
+    return resolved
 
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    html_path = BASE_DIR / "web" / "index.html"
+    html_path = WEB_DIR / "index.html"
     return html_path.read_text(encoding="utf-8")
 
 
 @app.get("/api/status")
 def api_status():
-    return db.get_stats()
+    stats = db.get_stats()
+    return {
+        "status": "online",
+        "database": stats,
+        "scanner": SCANNER_STATUS,
+        "sniped_deals_cached": len(SNIPED_DEALS),
+    }
 
 
 @app.get("/api/items/search")
-def api_search_items(q: str = Query("")):
-    query = q.strip()
+def api_search_items(q: str = "", limit: int = 20):
+    query = q.strip().lower()
     if not query:
-        return []
-    ql = query.lower()
+        top = sorted(ITEMS_CATALOG.values(), key=lambda x: x["value"], reverse=True)[:limit]
+        return {"items": top}
 
-    if ql.isdigit() and int(ql) in ITEMS_CATALOG:
-        ensure_thumbnails([int(ql)])
-        return [ITEMS_CATALOG[int(ql)]]
-
-    matches = []
+    exact = []
+    partial = []
     for it in ITEMS_CATALOG.values():
         acr = it.get("acronym", "").lower()
         name = it["name"].lower()
-        if acr == ql or name == ql:
-            matches.append((0, -it["value"], it))
-        elif ql in acr or ql in name:
-            matches.append((1, -it["value"], it))
-    matches.sort(key=lambda x: (x[0], x[1]))
-    top = [m[2] for m in matches[:15]]
+        if query == str(it["item_id"]) or query == acr or query == name:
+            exact.append(it)
+        elif query in name or (acr and query in acr):
+            partial.append(it)
 
-    # If fewer than 3 matches in local catalog, fall back live to Roblox Catalog v2 (Creator=Roblox, no UGC)
-    if len(top) < 3 and len(query) >= 3:
-        discovered = catalog_client.search_keyword(query, ITEMS_CATALOG)
-        new_items = [d for d in discovered if d["item_id"] not in ITEMS_CATALOG]
-        if new_items:
-            _save_discovered_roblox_items(new_items)
-        seen_ids = {x["item_id"] for x in top}
-        for d in discovered:
-            if d["item_id"] not in seen_ids and d["item_id"] in ITEMS_CATALOG:
-                top.append(ITEMS_CATALOG[d["item_id"]])
-                seen_ids.add(d["item_id"])
+    partial.sort(key=lambda x: (-int(x.get("is_valued", False)), -x["value"], len(x["name"])))
+    results = (exact + partial)[:limit]
 
-    ensure_thumbnails([x["item_id"] for x in top[:8]])
-    return top[:15]
+    if len(results) < 5 and len(query) >= 2:
+        live = catalog_client.search_keyword(q, ITEMS_CATALOG)
+        if live:
+            new_only = {x["item_id"]: x for x in live if x["item_id"] not in ITEMS_CATALOG}
+            if new_only:
+                db.upsert_items(new_only)
+                ITEMS_CATALOG.update(new_only)
+            seen_ids = {r["item_id"] for r in results}
+            for x in live:
+                if x["item_id"] not in seen_ids:
+                    results.append(x)
+                    seen_ids.add(x["item_id"])
+
+    missing_thumbs = [x["item_id"] for x in results[:20] if not x.get("thumbnail_url")]
+    if missing_thumbs:
+        thumbs = roblox.fetch_thumbnails(missing_thumbs)
+        if thumbs:
+            db.update_thumbnails(thumbs)
+            for iid, url in thumbs.items():
+                if iid in ITEMS_CATALOG:
+                    ITEMS_CATALOG[iid]["thumbnail_url"] = url
+            for x in results:
+                if x["item_id"] in thumbs:
+                    x["thumbnail_url"] = thumbs[x["item_id"]]
+
+    return {"items": results[:limit]}
 
 
-@app.post("/api/items/value")
-def api_set_item_value(req: SetItemValueRequest):
-    iid = int(req.item_id)
-    if iid not in ITEMS_CATALOG:
-        return {"error": f"Item {iid} not found"}
-    db.set_manual_item_value(iid, req.value)
-    ITEMS_CATALOG[iid]["manual_value"] = req.value
-    if req.value is not None and req.value >= 0:
-        ITEMS_CATALOG[iid]["value"] = int(req.value)
-        ITEMS_CATALOG[iid]["is_valued"] = True
-    else:
-        ITEMS_CATALOG[iid]["value"] = int(ITEMS_CATALOG[iid].get("default_value", ITEMS_CATALOG[iid]["rap"]))
-    return {"ok": True, "item": ITEMS_CATALOG[iid]}
+@app.get("/api/sniper")
+def api_sniper(
+    bucket: str = "ALL",
+    min_deal: float = 5.0,
+    sends: str = "",
+    wants: str = "",
+):
+    filtered = AdSniper.filter_deals(
+        SNIPED_DEALS,
+        bucket=bucket,
+        min_deal=min_deal,
+        sends_query=sends,
+        wants_query=wants,
+    )
+    return {"deals": filtered[:50]}
+
+
+@app.post("/api/sniper/refresh")
+def api_sniper_refresh():
+    added = poll_rolimons_ads_once()
+    return {"added": added, "total": len(SNIPED_DEALS)}
 
 
 @app.post("/api/tradecheck")
 def api_tradecheck(req: TradeCheckRequest):
-    ensure_thumbnails(req.give_ids + req.receive_ids)
-    return engine.analyze_trade(
-        give_item_ids=req.give_ids,
-        receive_item_ids=req.receive_ids,
-        items_catalog=ITEMS_CATALOG,
+    give_ids = _resolve_item_inputs(req.give)
+    recv_ids = _resolve_item_inputs(req.receive)
+    if (not give_ids and req.give_robux <= 0) or (not recv_ids and req.receive_robux <= 0):
+        raise HTTPException(
+            status_code=400,
+            detail="Add at least one valid item or Robux amount on both sides.",
+        )
+
+    thumbs = roblox.fetch_thumbnails(give_ids + recv_ids)
+    if thumbs:
+        db.update_thumbnails(thumbs)
+        for iid, url in thumbs.items():
+            if iid in ITEMS_CATALOG:
+                ITEMS_CATALOG[iid]["thumbnail_url"] = url
+
+    analysis = trade_engine.analyze_trade(
+        give_ids,
+        recv_ids,
+        ITEMS_CATALOG,
         engine_mode=req.engine,
-        recent_ads=RECENT_ADS_CACHE,
+        recent_ads=RECENT_RAW_ADS,
+        give_robux=req.give_robux,
+        receive_robux=req.receive_robux,
     )
 
-
-@app.get("/api/sniper")
-def api_sniper(bucket: str = "ALL", min_deal: float = 5.0):
-    results = []
-    for d in SNIPED_DEALS:
-        if d["deal_percent"] < min_deal:
-            continue
-        if bucket != "ALL" and d["bucket"] != bucket:
-            continue
-        results.append(d)
-    return results[:50]
+    png_bytes = render_trade_card_png(analysis["give_items"], analysis["receive_items"])
+    analysis["card_png_base64"] = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+    return analysis
 
 
-@app.post("/api/sniper/poll")
-def api_sniper_poll():
-    added = refresh_market_and_ads()
-    return {"added": added, "total": len(SNIPED_DEALS)}
+@app.get("/api/proofget")
+def api_proofget(item: str, mode: str = "any"):
+    found = find_item_by_query(item, ITEMS_CATALOG)
+    if not found:
+        live = catalog_client.search_keyword(item, ITEMS_CATALOG)
+        if live:
+            new_map = {x["item_id"]: x for x in live}
+            db.upsert_items(new_map)
+            ITEMS_CATALOG.update(new_map)
+            found = live[0]
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Item '{item}' not found.")
 
+    if not found.get("thumbnail_url"):
+        t_map = roblox.fetch_thumbnails([found["item_id"]])
+        if found["item_id"] in t_map:
+            found["thumbnail_url"] = t_map[found["item_id"]]
+            db.update_thumbnails(t_map)
 
-@app.get("/api/proofs")
-def api_proofs(q: str = Query("")):
-    item = resolve_or_discover_item(q)
-    if not item:
-        return {"error": f"Item '{q}' not found", "proofs": []}
     res = get_item_proofs_formatted(
-        db, item["item_id"], ITEMS_CATALOG, limit=3, sales_client=sales_client
+        db,
+        found["item_id"],
+        ITEMS_CATALOG,
+        limit=5,
+        mode=mode,
+        sales_client=sales_client,
     )
-    # Ensure thumbnails for every item inside the returned proofs
-    proof_item_ids = []
-    for p in res.get("proofs", []):
-        for side_it in p.get("items_a", []) + p.get("items_b", []):
-            if side_it.get("item_id"):
-                proof_item_ids.append(int(side_it["item_id"]))
-    if proof_item_ids:
-        ensure_thumbnails(proof_item_ids)
-        for p in res.get("proofs", []):
-            for side_it in p.get("items_a", []) + p.get("items_b", []):
-                iid = int(side_it.get("item_id", 0))
-                if iid in ITEMS_CATALOG and ITEMS_CATALOG[iid].get("thumbnail_url"):
-                    side_it["thumbnail_url"] = ITEMS_CATALOG[iid]["thumbnail_url"]
+    for card in res["proofs"]:
+        all_ids = [x["item_id"] for x in card["items_a"] + card["items_b"]]
+        thumbs = roblox.fetch_thumbnails(all_ids)
+        for x in card["items_a"] + card["items_b"]:
+            if x["item_id"] in thumbs:
+                x["thumbnail_url"] = thumbs[x["item_id"]]
+        png = render_trade_card_png(card["items_a"], card["items_b"])
+        card["card_png_base64"] = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
     return res
+
+
+@app.get("/api/oplookup")
+def api_oplookup(item: str, days: int = 30):
+    found = find_item_by_query(item, ITEMS_CATALOG)
+    if not found:
+        live = catalog_client.search_keyword(item, ITEMS_CATALOG)
+        if live:
+            new_map = {x["item_id"]: x for x in live}
+            db.upsert_items(new_map)
+            ITEMS_CATALOG.update(new_map)
+            found = live[0]
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Item '{item}' not found.")
+
+    if not found.get("thumbnail_url"):
+        t_map = roblox.fetch_thumbnails([found["item_id"]])
+        if found["item_id"] in t_map:
+            found["thumbnail_url"] = t_map[found["item_id"]]
+            db.update_thumbnails(t_map)
+
+    return compute_op_lookup(
+        db=db,
+        item_id=found["item_id"],
+        items_catalog=ITEMS_CATALOG,
+        recent_ads=RECENT_RAW_ADS,
+        sales_client=sales_client,
+        window_days=days,
+    )
 
 
 @app.post("/api/proofs/manual")
 def api_add_manual_proof(req: ManualProofRequest):
-    parts_a = [x.strip() for x in req.side_a.split(",") if x.strip()][:4]
-    parts_b = [x.strip() for x in req.side_b.split(",") if x.strip()][:4]
-    if not parts_a or not parts_b:
-        return {"error": "Provide at least 1 real item on each side"}
+    ids_a = _resolve_item_inputs(req.items_a)
+    ids_b = _resolve_item_inputs(req.items_b)
+    if not ids_a or not ids_b:
+        raise HTTPException(status_code=400, detail="Both sides need at least 1 valid item.")
 
-    items_a = []
-    for q in parts_a:
-        it = resolve_or_discover_item(q)
-        if not it:
-            return {"error": f"Could not find Side A item: '{q}'"}
-        items_a.append(
-            {
-                "item_id": it["item_id"],
-                "uaid": int(time.time() * 1000) + len(items_a),
-                "name": it["name"],
-                "acronym": it.get("acronym", ""),
-                "value": it["value"],
-                "rap": it["rap"],
-                "thumbnail_url": it.get("thumbnail_url", ""),
-            }
-        )
-
-    items_b = []
-    for q in parts_b:
-        it = resolve_or_discover_item(q)
-        if not it:
-            return {"error": f"Could not find Side B item: '{q}'"}
-        items_b.append(
-            {
-                "item_id": it["item_id"],
-                "uaid": int(time.time() * 1000) + 10 + len(items_b),
-                "name": it["name"],
-                "acronym": it.get("acronym", ""),
-                "value": it["value"],
-                "rap": it["rap"],
-                "thumbnail_url": it.get("thumbnail_url", ""),
-            }
-        )
-
+    items_a = [ITEMS_CATALOG[i] for i in ids_a]
+    items_b = [ITEMS_CATALOG[i] for i in ids_b]
     val_a = sum(x["value"] for x in items_a)
     rap_a = sum(x["rap"] for x in items_a)
     val_b = sum(x["value"] for x in items_b)
     rap_b = sum(x["rap"] for x in items_b)
 
+    trade_type = "SWAP"
+    if len(items_a) > len(items_b):
+        trade_type = "UPGRADE"
+    elif len(items_b) > len(items_a):
+        trade_type = "DOWNGRADE"
+
+    pred = trade_engine.analyze_trade(ids_a, ids_b, ITEMS_CATALOG, engine_mode="v3.1")
     tid = db.insert_trade(
-        user_a_id=8001,
-        user_a_name="TraderA",
-        user_b_id=8002,
-        user_b_name="TraderB",
+        user_a_id=999001,
+        user_a_name=req.user_a_name,
+        user_b_id=999002,
+        user_b_name=req.user_b_name,
         items_a=items_a,
         items_b=items_b,
         value_a=val_a,
@@ -457,41 +674,67 @@ def api_add_manual_proof(req: ManualProofRequest):
         rap_b=rap_b,
         op_value=abs(val_a - val_b),
         op_rap=abs(rap_a - rap_b),
-        trade_type="SWAP",
+        trade_type=trade_type,
+        predicted_op=int(pred.get("retrade_room", 0)),
     )
-    return {"ok": True, "trade_id": tid}
+    return {"trade_id": tid, "status": "saved"}
 
 
-@app.get("/api/op")
-def api_op_lookup(q: str = Query("")):
-    item = resolve_or_discover_item(q)
-    if not item:
-        return {"error": f"Item '{q}' not found"}
-    return compute_op_lookup(
-        db=db,
-        item_id=item["item_id"],
-        items_catalog=ITEMS_CATALOG,
-        recent_ads=RECENT_ADS_CACHE,
-        sales_client=sales_client,
+@app.get("/api/export/db")
+def api_export_db():
+    db_file = BASE_DIR / "void_data.sqlite3"
+    if not db_file.exists():
+        raise HTTPException(status_code=404, detail="Database file not found")
+    return FileResponse(
+        path=str(db_file),
+        filename="void_data.sqlite3",
+        media_type="application/x-sqlite3",
     )
 
 
-@app.get("/api/render/card.png")
-def api_render_card(give: str = "", receive: str = ""):
-    g_ids = [int(x) for x in give.split(",") if x.strip().isdigit()]
-    r_ids = [int(x) for x in receive.split(",") if x.strip().isdigit()]
-    ensure_thumbnails(g_ids + r_ids)
-    g_items = [ITEMS_CATALOG[x] for x in g_ids if x in ITEMS_CATALOG]
-    r_items = [ITEMS_CATALOG[x] for x in r_ids if x in ITEMS_CATALOG]
-    png_bytes = render_trade_card_png(g_items, r_items)
-    return Response(content=png_bytes, media_type="image/png")
+@app.get("/api/card.png")
+def api_render_card(offer: str = "", request: str = ""):
+    offer_ids = _resolve_item_inputs([x for x in offer.split(",") if x.strip()])
+    req_ids = _resolve_item_inputs([x for x in request.split(",") if x.strip()])
+    offer_items = [ITEMS_CATALOG[i] for i in offer_ids]
+    req_items = [ITEMS_CATALOG[i] for i in req_ids]
+    png = render_trade_card_png(offer_items, req_items)
+    return Response(content=png, media_type="image/png")
+
+
+def _free_port_on_windows(port: int) -> None:
+    if os.name != "nt":
+        return
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            f'netstat -aon | findstr :{port} | findstr LISTENING',
+            shell=True,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        my_pid = os.getpid()
+        for line in out.splitlines():
+            parts = line.strip().split()
+            if parts:
+                pid_str = parts[-1]
+                if pid_str.isdigit() and int(pid_str) != my_pid:
+                    subprocess.run(
+                        f"taskkill /F /PID {pid_str}",
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+        time.sleep(0.5)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    host = os.environ.get("HOST", cfg.get("server", {}).get("host", "127.0.0.1"))
-    port = int(os.environ.get("PORT", cfg.get("server", {}).get("port", 8765)))
-    url = f"http://{host}:{port}"
-    print(f"Starting Void Local Market Suite at {url}")
-    if host == "127.0.0.1":
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    import uvicorn
+
+    srv = CONFIG.get("server", {})
+    host = os.environ.get("HOST", str(srv.get("host", "127.0.0.1")))
+    port = int(os.environ.get("PORT", srv.get("port", 8765)))
+    _free_port_on_windows(port)
+    uvicorn.run("app:app", host=host, port=port, reload=False)

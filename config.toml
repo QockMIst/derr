@@ -19,10 +19,10 @@ min_proofs_for_full_weight = 3
 proof_max_age_days = 30
 
 [discord]
-bot_token = "MTU2ODQyNzIxODUxMjY1MDQ0MQ.G71zcY.jETPRdIc2VU5ODwkGxXHuFbAynuTyAVeXsAGfw"
+bot_token = ""
 owner_id = 1388335689229275220
 value_requests_channel_id = "535250426061258753"
-scanner_token = "MTEwNTg1MDM0ODA2NjgzNjU3Mg.Gf8vXb.QDrvuh1MhjSM793anCEmPiLLDT50RoeEOkpg1Q"
+scanner_token = ""
 
 [server]
 host = "127.0.0.1"
