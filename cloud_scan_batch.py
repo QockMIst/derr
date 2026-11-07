@@ -214,13 +214,21 @@ def match_pending(conn: sqlite3.Connection, items_catalog: Dict[int, Dict[str, A
         if not clean_a or not clean_b:
             continue
 
-        ts_a = max(m["detected_at"] for m in clean_a)
-        ts_b = max(m["detected_at"] for m in clean_b)
-        if abs(ts_a - ts_b) > 300:
+        ts_groups_a = defaultdict(list)
+        for m in clean_a:
+            ts_groups_a[m["detected_at"] // 60].append(m)
+
+        ts_groups_b = defaultdict(list)
+        for m in clean_b:
+            ts_groups_b[m["detected_at"] // 60].append(m)
+
+        common_buckets = set(ts_groups_a.keys()) & set(ts_groups_b.keys())
+        if not common_buckets:
             continue
 
-        side_a = clean_a[:4]
-        side_b = clean_b[:4]
+        best_bucket = max(common_buckets)
+        side_a = ts_groups_a[best_bucket][:4]
+        side_b = ts_groups_b[best_bucket][:4]
 
         def _build(mv_list):
             res = []
