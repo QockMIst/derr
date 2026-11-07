@@ -269,8 +269,8 @@ def match_pending(conn: sqlite3.Connection, items_catalog: Dict[int, Dict[str, A
                 INSERT INTO trades (
                     user_a_id, user_a_name, user_b_id, user_b_name,
                     items_a_json, items_b_json, value_a, rap_a, value_b, rap_b,
-                    op_value, op_rap, trade_type, detected_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    op_value, op_rap, trade_type, detected_at, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scanner')
                 """,
                 (
                     u_a,
@@ -572,38 +572,8 @@ def main() -> None:
                     [(int(u), int(i), uid, step_now) for u, i in inv.items()],
                 )
 
-                current_uaids = {int(u) for u in inv.keys()}
-                departed = [u for u in prev_owned.keys() if u not in current_uaids]
-                if departed:
-                    cp_rows = conn.execute(
-                        """
-                        SELECT DISTINCT from_user_id AS cp FROM uaid_moves
-                        WHERE to_user_id = ? AND detected_at >= ? AND matched_trade_id IS NULL
-                        UNION
-                        SELECT DISTINCT to_user_id AS cp FROM uaid_moves
-                        WHERE from_user_id = ? AND detected_at >= ? AND matched_trade_id IS NULL
-                        """,
-                        (uid, step_now - 600, uid, step_now - 600),
-                    ).fetchall()
-                    cps = [int(r["cp"]) for r in cp_rows if int(r["cp"]) != uid and int(r["cp"]) > 0]
-                    if len(cps) == 1:
-                        target_cp = cps[0]
-                        for dep_u in departed[:4]:
-                            dep_iid = prev_owned[dep_u]
-                            already = conn.execute(
-                                "SELECT 1 FROM uaid_moves WHERE uaid = ? AND from_user_id = ? AND detected_at >= ?",
-                                (dep_u, uid, step_now - 900),
-                            ).fetchone()
-                            if not already:
-                                conn.execute(
-                                    "INSERT INTO uaid_moves (uaid, item_id, from_user_id, to_user_id, detected_at) VALUES (?, ?, ?, ?, ?)",
-                                    (dep_u, dep_iid, uid, target_cp, step_now),
-                                )
-                                conn.execute(
-                                    "UPDATE owners SET user_id = ?, seen_at = ? WHERE uaid = ?",
-                                    (target_cp, step_now, dep_u),
-                                )
-                                moves_count += 1
+                # NEVER guess counterparties for departed UAIDs.
+                # Only record UAID movements when the new owner's inventory is directly observed with that UAID.
             conn.execute(
                 "UPDATE traders SET last_scanned_at = ?, scan_count = scan_count + 1 WHERE user_id = ?",
                 (step_now, uid),
