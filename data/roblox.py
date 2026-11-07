@@ -112,3 +112,23 @@ class RobloxClient:
             except Exception:
                 continue
         return result
+
+    def fetch_user_headshots(self, user_ids: List[int]) -> Dict[int, str]:
+        result: Dict[int, str] = {}
+        unique_ids = [int(x) for x in set(user_ids) if x]
+        for i in range(0, len(unique_ids), 50):
+            batch = unique_ids[i : i + 50]
+            ids_str = ",".join(str(x) for x in batch)
+            url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={ids_str}&size=150x150&format=Png&isCircular=false"
+            try:
+                req = urllib.request.Request(url, headers=HEADERS)
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+                for item in payload.get("data", []):
+                    tid = item.get("targetId")
+                    img = item.get("imageUrl")
+                    if tid and img:
+                        result[int(tid)] = str(img)
+            except Exception:
+                continue
+        return result
