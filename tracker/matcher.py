@@ -7,7 +7,7 @@ from db import Database
 def match_moves_into_trades(
     db: Database,
     items_catalog: Dict[int, Dict[str, Any]],
-    match_window_seconds: int = 7200,
+    match_window_seconds: int = 300,
     now_ts: Optional[int] = None,
     predict_op_fn: Optional[Callable[[List[int], List[int]], Optional[int]]] = None,
 ) -> List[int]:
