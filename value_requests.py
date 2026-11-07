@@ -178,7 +178,7 @@ def _extract_items_from_boxes(
         slots: List[Dict[str, Any]] = []
         for box, text in lines:
             tl = text.lower()
-            if any(skip in tl for skip in ("total value", "totalvalue", "robux offered", "items you", "itemsyou", "trade with", "tradewith")):
+            if any(skip in tl for skip in ("total value", "totalvalue", "robux offered", "robuxoffered", "items you", "itemsyou", "trade with", "tradewith")):
                 continue
             if re.match(r"^[米茶#\d\s\W]+$", text) or re.match(r"^[QO0≥]?\s*[\d,.]+$", text):
                 continue
@@ -671,13 +671,15 @@ def parse_value_request_text(
             boxes = _call_rapidocr_boxes(b)
             if boxes:
                 box_a, box_b = _extract_items_from_boxes(boxes, items_catalog)
-                if box_a and box_b:
-                    side_a_items = box_a
-                    side_b_items = box_b
+                if box_a or box_b:
+                    if box_a:
+                        side_a_items = box_a
+                    if box_b:
+                        side_b_items = box_b
                     break
 
     ocr_text = ""
-    if not side_a_items and all_imgs and not text_complete:
+    if (not side_a_items or not side_b_items) and all_imgs and not text_complete:
         ocr_chunks = [ocr_trade_screenshot_bytes(b) for b in all_imgs if b]
         ocr_text = "\n".join(c for c in ocr_chunks if c)
 
